@@ -118,7 +118,7 @@ export const ENEMY = {
   /* ---------------- 自爆蛛：靠近后点燃引信 / 死亡都会炸 ---------------- */
   BOMBER: {
     TRIGGER_DIST: 90,       // 进入这个距离就点燃引信，不再立刻爆炸
-    EXPLODE_RADIUS: 100,    // 爆炸半径
+    EXPLODE_RADIUS: 80,    // 爆炸半径
     DAMAGE: 20,             // 爆炸对玩家固定 20（和普通受击一致）
     FUSE: 0.65,             // 引信时间：点燃后 0.65 秒才爆炸，给玩家逃跑窗口
   },
@@ -170,8 +170,8 @@ export const ENEMY = {
 
 /* ---------------- 刷怪节奏 ---------------- */
 export const SPAWN = {
-  ROOM1_COUNT: 12,        // 第 1 房固定 12 只
-  ROOM2_COUNT: 14,        // 第 2 房固定 14 只
+  ROOM1_COUNT: 12,        // 第 1 房固定 10 追猎 + 1 射手 + 1 分裂体
+  ROOM2_COUNT: 15,        // 第 2 房固定 13 追猎 + 1 自爆蛛 + 1 射手
   COUNT_BASE: 9,          // 之后每房 round(min(52, 9 + 1.6×wave))
   COUNT_PER_WAVE: 1.6,
   COUNT_CAP: 52,
@@ -186,12 +186,15 @@ export const SPAWN = {
   EDGE: 25,               // 出生点在屏幕四边，离边缘 25px
 
   /* 类型分布（roll 是 0–1 随机数）：
-     1–5 房：全部追猎，保证前期是纯粹的走位压力；
-     6–9 房：追猎 / 射手 / 分裂体；
-     10 房起：自爆蛛加入，并且占比明显变大。 */
-  CHASER_UNTIL_WAVE: 5,    // 这一房及以前只出追猎
-  MID_ROLL_SHOOTER: 0.55,  // 6–9 房：roll < 0.55 追猎，< 0.8 射手，其余分裂体
-  MID_ROLL_SPLITTER: 0.8,
+     1–2 房：固定教学阵容，由 buildRoomPlan 直接返回；
+     3–4 房：约 20% 射手/分裂体，让新怪种轻量登场；
+     5–9 房：自爆蛛占约 10%，射手/分裂体逐步增多；
+     10 房起：恢复高比例机制怪。 */
+  EARLY_ROLL_SHOOTER: 0.8, // 3–4 房：< 0.8 追猎，< 0.9 射手，其余分裂体
+  EARLY_ROLL_SPLITTER: 0.9,
+  MID_ROLL_CHASER: 0.55,   // 5–9 房：< 0.55 追猎
+  MID_ROLL_SHOOTER: 0.8,   // < 0.8 射手
+  MID_ROLL_SPLITTER: 0.9,  // < 0.9 分裂体，其余自爆蛛（约 10%）
   LATE_ROLL_CHASER: 0.3,   // 10 房起：< 0.3 追猎
   LATE_ROLL_SHOOTER: 0.5,  // < 0.5 射手
   LATE_ROLL_SPLITTER: 0.7, // < 0.7 分裂体，其余自爆蛛

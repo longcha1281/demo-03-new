@@ -67,7 +67,31 @@ function fitCanvas() {
   c.style.height = c.height * scale + 'px';
 }
 window.addEventListener('resize', fitCanvas);
-document.addEventListener('fullscreenchange', fitCanvas);
+
+// 浏览器按 Esc 退出全屏时，keydown 经常被浏览器自己吃掉，
+// 所以不能只靠键盘事件暂停；这里监听全屏状态变化，退出后补一次暂停。
+let fullscreenBeforeChange = Boolean(document.fullscreenElement);
+// 用按钮 / F 键主动退出全屏时，不应该顺带切换暂停，用这个标记跳过
+let skipPauseAfterFullscreenExit = false;
+// 记录最近一次退出全屏的时间；防止 Esc 的 keydown 和 fullscreenchange 各暂停一次
+let lastFullscreenExitAt = 0;
+
+document.addEventListener('fullscreenchange', () => {
+  fitCanvas();
+
+  const isFullscreen = Boolean(document.fullscreenElement);
+  const justExited = fullscreenBeforeChange && !isFullscreen;
+
+  if (justExited) {
+    lastFullscreenExitAt = Date.now();
+    if (!skipPauseAfterFullscreenExit && togglePause() !== null) {
+      syncPauseUI();
+    }
+    skipPauseAfterFullscreenExit = false;
+  }
+
+  fullscreenBeforeChange = isFullscreen;
+});
 fitCanvas(); // 启动时先算一次
 
 // ---- 3.5 中键锁定 ----
@@ -132,10 +156,21 @@ function pointInHudButton(mx, my, rect) {
   );
 }
 
+/**
+ * 主动退出全屏（按钮 / F 键）：不触发“退出全屏后暂停”的补偿逻辑。
+ * 标记在 fullscreenchange 回调里消费一次；如果退出失败则立刻清掉。
+ */
+function exitFullscreenWithoutPause() {
+  skipPauseAfterFullscreenExit = true;
+  document.exitFullscreen().catch(() => {
+    skipPauseAfterFullscreenExit = false;
+  });
+}
+
 /** 切换全屏：Canvas 的全屏按钮和键盘 F 共用这一段。 */
 function toggleFullscreen() {
   if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {});
+    exitFullscreenWithoutPause();
   } else {
     document.documentElement.requestFullscreen().catch(() => {});
   }
@@ -223,11 +258,20 @@ window.addEventListener('keydown', (e) => {
     return; // 全屏键不传给移动/冲刺
   }
 
-  // Esc：既退出全屏，又切换暂停（按住不放只处理第一次）
+  // Esc：在全屏里先退出全屏，由 fullscreenchange 补暂停；
+  // 不在全屏时直接切换暂停（按住不放只处理第一次）。
   if (e.code === 'Escape' && !e.repeat) {
     if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
+      document.exitFullscreen().catch(() => {
+        // 极少数浏览器取消失败时没有 fullscreenchange，兜底暂停一次
+        if (togglePause() !== null) syncPauseUI();
+      });
+      return;
     }
+
+    // 刚由 Esc 退出全屏时，fullscreenchange 已经暂停过了，这里不要再切回去
+    if (Date.now() - lastFullscreenExitAt < 250) return;
+
     if (togglePause() !== null) {
       syncPauseUI();
       return; // 暂停键不往下传给移动逻辑
@@ -268,9 +312,9 @@ btnResume.addEventListener('click', () => {
 });
 
 btnExitFs.addEventListener('click', () => {
-  // 只有确实在全屏时才退出；没全屏就什么也不做
+  // 只有确实在全屏时才退出；暂停菜单里的退出按钮不额外切换暂停
   if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {});
+    exitFullscreenWithoutPause();
   }
 });
 
