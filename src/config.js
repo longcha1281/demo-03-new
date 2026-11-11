@@ -486,6 +486,20 @@ export const WEAPON = {
   ],
 };
 
+/* ---------------- 法术编译器（spell.js） ----------------
+   开火数据包的固定规则；改这里就能调整整个法术系统。 */
+export const SPELL = {
+  TRIPLE_SHOT_BONUS: 2,   // 三向散射额外 +2 发
+  TRIPLE_DAMAGE_MUL: 0.7, // 三向散射每发伤害倍率
+  TRIPLE_SPREAD: 0.17,    // 原本没有张角时，扇形半张角（弧度）
+  PIERCE_BONUS: 2,        // 穿透额外 +2 次命中
+  CAST_MAX_COUNT: 12,       // 一次开火最多 12 发（取消旧的 5 发封印）
+  FISSION_MAX_COUNT: 8,     // 单次裂变最多生成 8 发子代，防止几何级数直接卡死
+  MAX_FISSION_DEPTH: 2,   // 裂变最多到第几代（0 母 → 1 子 → 2 孙）
+  LIGHTNING_SPEED_MUL: 1.8, // 闪电形态：速度 ×1.8，换来"高速弹"
+  LIGHTNING_LIFE_MUL: 0.55, // 闪电形态：寿命 ×0.55，短命但飞得远
+};
+
 /* ---------------- 血包 ----------------
    只有生命汲取 Lv3 击杀时才会掉落；走近自动拾取。 */
 export const PICKUP = {

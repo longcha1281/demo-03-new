@@ -465,6 +465,9 @@ export function beginRoom(wave) {
 export function finishRoom(kind) {
   const p = G.p;
 
+  // 沙盒模式：清光怪也不回血、不加分、不弹选卡 / 装配室，方便反复刷怪测试
+  if (G.isSandbox) return;
+
   // 回血受生命上限限制，不能超过最大值
   const healed = Math.min(ROOM.HEAL, p.max - p.hp);
   p.hp += healed;
@@ -841,6 +844,9 @@ export function update(dt) {
  * @param {number} dt 秒
  */
 export function updateSpawn(dt) {
+  // 沙盒模式由 F2 面板手动刷怪，暂停本房自动刷怪，避免清完又自己冒出来
+  if (G.isSandbox) return;
+
   // 计划已经刷完：本房不再生成
   if (G.roomSpawnIndex >= G.roomSpawnPlan.length) {
     G.left = 0;

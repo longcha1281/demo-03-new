@@ -1,0 +1,1096 @@
+
+  /* 页面：纯黑背景，游戏画面永远居中 */
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #04060b;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* 画布：物理尺寸 1440×810，等于逻辑视野 960×540 的 1.5 倍。
+     显示大小由 main.js 的 fitCanvas() 按窗口算：保持 16:9，绝不变形。 */
+  #game {
+    display: block;
+    image-rendering: auto;
+  }
+
+  /* 暂停遮罩：fixed 覆盖整屏，flex 居中。
+     深色遮罩是兜底，backdrop-filter 支持的浏览器里再把战场模糊掉。 */
+  #pause-menu {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(4, 6, 11, 0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  #pause-menu.hidden {
+    display: none;
+  }
+  /* F2 调试台打开时临时藏起暂停遮罩，避免它压在面板下面 */
+  #pause-menu.debug-suspended {
+    display: none;
+  }
+
+  /* 暂停面板：深色半透明玻璃 + 多层青色边框（细线 / 外发光 / 内描边）。
+     不再用 clip-path 切角，四角要留给不会被裁掉的科技角标。 */
+  .pause-panel {
+    position: relative;
+    box-sizing: border-box;
+    width: min(320px, calc(100vw - 48px));
+    padding: 24px;
+    font-family: "Courier New", monospace;
+    text-align: center;
+    color: #d8ecff;
+    background:
+      repeating-linear-gradient(
+        0deg,
+        rgba(255, 255, 255, 0.02) 0 1px,
+        transparent 1px 3px
+      ),
+      rgba(4, 6, 11, 0.85);
+    border: 1px solid rgba(57, 246, 255, 0.55);
+    border-radius: 0;
+    box-shadow:
+      0 0 0 1px rgba(57, 246, 255, 0.18),
+      0 0 28px rgba(57, 246, 255, 0.22),
+      inset 0 0 0 1px rgba(57, 246, 255, 0.16),
+      inset 0 0 34px rgba(0, 0, 0, 0.55);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .pause-panel h2 {
+    margin: 0 0 10px;
+    font-size: 22px;
+    color: #39f6ff;
+  }
+  .pause-panel p {
+    margin: 0 0 16px;
+    font-size: 12px;
+    color: rgba(180, 210, 240, 0.7);
+  }
+  /* 暂停按钮：纯半透明深底，去掉斜纹；左侧 2px 青色高亮竖线。 */
+  .pause-panel button {
+    position: relative;
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 8px;
+    padding: 9px 16px 9px 18px;
+    appearance: none;
+    -webkit-appearance: none;
+    font-family: inherit;
+    font-size: 13px;
+    letter-spacing: 2px;
+    text-align: center;
+    color: #9ff7ff;
+    background: rgba(8, 14, 24, 0.72);
+    border: 0;
+    border-radius: 0;
+    outline: none;
+    box-shadow: inset 0 0 0 1px rgba(57, 246, 255, 0.28);
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+  }
+  /* 左侧高亮竖线：用伪元素画，不占按钮文字的位置 */
+  .pause-panel button::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 2px;
+    background: #39f6ff;
+    box-shadow: 0 0 8px rgba(57, 246, 255, 0.8);
+    pointer-events: none;
+  }
+  .pause-panel button:hover {
+    color: #eafdff;
+    background: rgba(20, 42, 58, 0.85);
+    box-shadow:
+      inset 0 0 0 1px rgba(57, 246, 255, 0.7),
+      0 0 14px rgba(57, 246, 255, 0.25);
+  }
+  /* hover 竖线加粗，但按钮内边距不变，文字不会跳 */
+  .pause-panel button:hover::before {
+    width: 4px;
+  }
+  .pause-panel button:focus-visible {
+    outline: 1px solid #39f6ff;
+    outline-offset: 2px;
+  }
+
+  /* 暂停面板最多占八成屏高，窗口太矮时内部滚动，按钮不会溢出屏幕 */
+  .pause-panel {
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+
+  /* 四角科技角标：L 形细线，位置由各面板的 --corner-inset 决定。
+     pointer-events:none 保证它不会挡住下面的按钮 / 卡片点击。 */
+  .panel-corner {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border: 1px solid rgba(57, 246, 255, 0.7);
+    pointer-events: none;
+    filter: drop-shadow(0 0 4px rgba(57, 246, 255, 0.6));
+  }
+  .panel-corner.tl {
+    top: var(--corner-inset, 8px);
+    left: var(--corner-inset, 8px);
+    border-right: 0;
+    border-bottom: 0;
+  }
+  .panel-corner.tr {
+    top: var(--corner-inset, 8px);
+    right: var(--corner-inset, 8px);
+    border-left: 0;
+    border-bottom: 0;
+  }
+  .panel-corner.bl {
+    bottom: var(--corner-inset, 8px);
+    left: var(--corner-inset, 8px);
+    border-right: 0;
+    border-top: 0;
+  }
+  .panel-corner.br {
+    bottom: var(--corner-inset, 8px);
+    right: var(--corner-inset, 8px);
+    border-left: 0;
+    border-top: 0;
+  }
+
+  /* ==========================================================
+     选卡面板（三选一 / 四选一 / 开局选星核）
+     全屏暗幕 + 玻璃霓虹卡；所有图标都用 CSS 几何图形画，零图片
+     ========================================================== */
+  /* 两种面板共用同一套全屏布局与背景 */
+  #reward-panel,
+  #core-panel,
+  #secondary-panel {
+    position: fixed;
+    inset: 0;
+    /* 全屏面板的四角角标往内收一点，避开窗口边缘 */
+    --corner-inset: 22px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 26px;
+    background:
+      radial-gradient(circle at 50% 38%, rgba(57, 246, 255, 0.07), transparent 55%),
+      rgba(3, 5, 10, 0.82);
+    backdrop-filter: blur(12px);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  #reward-panel {
+    z-index: 30;
+  }
+  #core-panel {
+    z-index: 35;
+  }
+  #secondary-panel {
+    z-index: 36;
+  }
+  #reward-panel.hidden,
+  #core-panel.hidden,
+  #secondary-panel.hidden {
+    display: none;
+  }
+
+  /* 标题：白青色 + 霓虹光晕，两侧各一条渐隐细线 */
+  #reward-title,
+  #core-panel h2,
+  #secondary-panel h2 {
+    position: relative;
+    margin: 0;
+    font-size: 30px;
+    letter-spacing: 8px;
+    color: #eafdff;
+    text-shadow:
+      0 0 12px rgba(57, 246, 255, 0.9),
+      0 0 34px rgba(57, 246, 255, 0.45);
+  }
+  #reward-title::before,
+  #reward-title::after,
+  #core-panel h2::before,
+  #core-panel h2::after,
+  #secondary-panel h2::before,
+  #secondary-panel h2::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: 72px;
+    height: 1px;
+    pointer-events: none;
+  }
+  #reward-title::before,
+  #core-panel h2::before,
+  #secondary-panel h2::before {
+    right: calc(100% + 18px);
+    background: linear-gradient(90deg, transparent, rgba(57, 246, 255, 0.75));
+  }
+  #reward-title::after,
+  #core-panel h2::after,
+  #secondary-panel h2::after {
+    left: calc(100% + 18px);
+    background: linear-gradient(90deg, rgba(57, 246, 255, 0.75), transparent);
+  }
+
+  /* 奖励面板副标题 */
+  .panel-sub {
+    margin: -6px 0 0;
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: rgba(180, 210, 240, 0.65);
+  }
+
+  /* 开局选星核的副标题（保留原样） */
+  .core-sub {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: rgba(180, 210, 240, 0.6);
+  }
+
+  /* 卡片容器：一排居中，窗口太窄时自动换行 */
+  #reward-cards,
+  #core-cards,
+  #secondary-cards {
+    display: flex;
+    gap: 28px;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    max-width: calc(100vw - 48px);
+  }
+
+  /* ----------------------------------------------------------
+     卡牌本体：属性卡与遗物卡共用（只差类名，尺寸完全一致）
+     ---------------------------------------------------------- */
+  .reward-card,
+  .core-card {
+    width: 240px;
+    height: 340px;
+    flex: 0 0 240px;
+    box-sizing: border-box;
+    padding: 0 18px 22px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    appearance: none;
+    -webkit-appearance: none;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: rgba(10, 15, 25, 0.7);
+    backdrop-filter: blur(10px);
+    border: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+    border-radius: 0;
+    /* 左上、右下切角；clip-path 会裁掉外发光，外发光改由 filter 负责 */
+    clip-path: polygon(
+      24px 0,
+      100% 0,
+      100% calc(100% - 24px),
+      calc(100% - 24px) 100%,
+      0 100%,
+      0 24px
+    );
+    box-shadow:
+      inset 0 0 30px rgba(0, 0, 0, 0.55),
+      inset 0 0 22px color-mix(in srgb, var(--accent) 14%, transparent);
+    filter: drop-shadow(
+      0 0 12px color-mix(in srgb, var(--accent) 45%, transparent)
+    );
+    color: #d8ecff;
+    cursor: pointer;
+    transition: all 0.2s ease-out;
+    animation: card-in 0.38s ease-out backwards;
+  }
+  /* 双线：实线外框之外再套一圈虚线内框，强化"机舱面板"的层次 */
+  .reward-card::before,
+  .core-card::before {
+    content: "";
+    position: absolute;
+    inset: 7px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+    clip-path: polygon(
+      18px 0,
+      100% 0,
+      100% calc(100% - 18px),
+      calc(100% - 18px) 100%,
+      0 100%,
+      0 18px
+    );
+    opacity: 0.65;
+    pointer-events: none;
+  }
+  /* 后三张依次晚一点入场，形成错落感 */
+  .reward-card:nth-child(2),
+  .core-card:nth-child(2) {
+    animation-delay: 0.06s;
+  }
+  .reward-card:nth-child(3),
+  .core-card:nth-child(3) {
+    animation-delay: 0.12s;
+  }
+  .reward-card:nth-child(4),
+  .core-card:nth-child(4) {
+    animation-delay: 0.18s;
+  }
+  .reward-card:hover,
+  .core-card:hover {
+    transform: translateY(-10px) scale(1.05);
+    background: rgba(18, 28, 46, 0.86);
+    border-color: color-mix(in srgb, var(--accent) 95%, #fff);
+    box-shadow:
+      inset 0 0 30px rgba(0, 0, 0, 0.5),
+      inset 0 0 26px color-mix(in srgb, var(--accent) 22%, transparent);
+    /* 外发光加强：双层 drop-shadow，替代被 clip-path 裁掉的 box-shadow */
+    filter:
+      drop-shadow(0 0 14px var(--accent))
+      drop-shadow(
+        0 0 34px color-mix(in srgb, var(--accent) 55%, transparent)
+      );
+    z-index: 2;
+  }
+  /* 键盘 Tab 到卡片时也要看得见 */
+  .reward-card:focus-visible,
+  .core-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+  }
+
+  /* 卡面上半区：图标舞台 + 背后的英雄色光晕 */
+  .pick-art {
+    position: relative;
+    width: 100%;
+    height: 136px;
+    flex: 0 0 136px;
+    display: grid;
+    place-items: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    /* 左上角一小块斜纹角标，像仪表盘上的警示区 */
+    background-image: repeating-linear-gradient(
+      45deg,
+      color-mix(in srgb, var(--accent) 35%, transparent) 0 1px,
+      transparent 1px 4px
+    );
+    background-size: 22px 22px;
+    background-position: 0 0;
+    background-repeat: no-repeat;
+  }
+  /* 条形码：纯 CSS 细条纹，强化"装备标签"的机甲感 */
+  .pick-art::after {
+    content: "";
+    position: absolute;
+    top: 7px;
+    left: 14px;
+    width: 72px;
+    height: 7px;
+    background: repeating-linear-gradient(
+      90deg,
+      var(--accent) 0 1px,
+      transparent 1px 3px,
+      var(--accent) 3px 4px,
+      transparent 4px 7px
+    );
+    opacity: 0.55;
+    pointer-events: none;
+  }
+  .pick-art::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      circle,
+      color-mix(in srgb, var(--accent) 18%, transparent) 0%,
+      transparent 68%
+    );
+    pointer-events: none;
+  }
+
+  /* 类型标签：等宽字体胶囊 */
+  .pick-tag {
+    margin-top: 16px;
+    padding: 4px 12px;
+    font-family: "Courier New", monospace;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    text-shadow: 0 0 8px var(--accent);
+  }
+
+  /* 卡名 */
+  .pick-name {
+    margin: 10px 0 8px;
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    color: #fff;
+    text-shadow: 0 0 16px var(--accent);
+  }
+
+  /* 描述：沉在卡片底部 */
+  .pick-desc {
+    margin: auto 0 0;
+    max-width: 200px;
+    font-size: 14px;
+    line-height: 1.65;
+    color: rgba(216, 236, 255, 0.82);
+  }
+
+  /* 描述里的数字高亮 */
+  .num {
+    color: #ffe66b;
+    font-weight: 700;
+    text-shadow: 0 0 8px rgba(255, 230, 107, 0.55);
+  }
+
+  /* ----------------------------------------------------------
+     纯 CSS 图标：.geo 是 64×64 舞台，按 card.id 换形状
+     ---------------------------------------------------------- */
+  .geo {
+    position: relative;
+    display: block;
+    width: 64px;
+    height: 64px;
+    /* 单独用 scale 属性放大图标；不碰 transform，避免覆盖火焰抖动/爱心旋转 */
+    scale: 1.15;
+    filter:
+      drop-shadow(0 0 10px var(--accent))
+      drop-shadow(0 0 26px var(--accent));
+  }
+
+  /* 脉冲增压：白色到强调色的闪电 */
+  .geo-power {
+    width: 34px;
+    height: 58px;
+    background: linear-gradient(180deg, #fff 0%, var(--accent) 70%);
+    clip-path: polygon(58% 0, 4% 56%, 42% 56%, 32% 100%, 96% 42%, 58% 42%);
+  }
+
+  /* 生命修复：方块 + 两个圆伪元素组成的爱心 */
+  .geo-vitality {
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent) 65%, #fff),
+      var(--accent)
+    );
+    transform: rotate(-45deg);
+  }
+  .geo-vitality::before,
+  .geo-vitality::after {
+    content: "";
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: inherit;
+  }
+  .geo-vitality::before {
+    top: -20px;
+    left: 0;
+  }
+  .geo-vitality::after {
+    top: 0;
+    left: 20px;
+  }
+
+  /* 相位步频：缺口的圆环 + 顶部箭头 */
+  .geo-agility {
+    width: 56px;
+    height: 56px;
+    border: 4px solid var(--accent);
+    border-right-color: transparent;
+    border-bottom-color: transparent;
+    border-radius: 50%;
+    transform: rotate(-45deg);
+  }
+  .geo-agility::after {
+    content: "";
+    position: absolute;
+    top: -11px;
+    left: 50%;
+    width: 0;
+    height: 0;
+    margin-left: -7px;
+    border: 7px solid transparent;
+    border-top: 0;
+    border-bottom: 12px solid var(--accent);
+  }
+
+  /* 三向散射：三根竖条，两侧以底部为轴张开 */
+  .geo-tripleShot {
+    width: 8px;
+    height: 56px;
+    border-radius: 4px;
+    background: linear-gradient(180deg, #fff, var(--accent));
+  }
+  .geo-tripleShot::before,
+  .geo-tripleShot::after {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 8px;
+    height: 56px;
+    border-radius: 4px;
+    background: inherit;
+    transform-origin: 50% 100%;
+  }
+  .geo-tripleShot::before {
+    transform: rotate(-22deg);
+  }
+  .geo-tripleShot::after {
+    transform: rotate(22deg);
+  }
+
+  /* 穿透弹芯：双 V 形箭头，后一层做半透明残影 */
+  .geo-piercing {
+    width: 46px;
+    height: 46px;
+    border-top: 6px solid var(--accent);
+    border-right: 6px solid var(--accent);
+    transform: rotate(45deg);
+  }
+  .geo-piercing::after {
+    content: "";
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    width: 30px;
+    height: 30px;
+    border-top: 6px solid var(--accent);
+    border-right: 6px solid var(--accent);
+    opacity: 0.35;
+  }
+
+  /* 生命汲取：带高光的水滴 */
+  .geo-lifesteal {
+    width: 42px;
+    height: 42px;
+    border-radius: 50% 50% 50% 0;
+    background: radial-gradient(
+      circle at 35% 30%,
+      #fff 0%,
+      var(--accent) 45%,
+      color-mix(in srgb, var(--accent) 55%, #000) 100%
+    );
+    transform: rotate(-45deg);
+  }
+
+  /* 超频：三条速度线 + 右侧箭头 */
+  .geo-rapidFire {
+    width: 58px;
+    height: 5px;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent), #fff);
+    box-shadow:
+      0 14px 0 var(--accent),
+      0 -14px 0 var(--accent);
+  }
+  .geo-rapidFire::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: -15px;
+    width: 0;
+    height: 0;
+    margin-top: -7px;
+    border: 7px solid transparent;
+    border-right: 0;
+    border-left: 11px solid var(--accent);
+  }
+
+  /* 应急补给：圆角十字 */
+  .geo-heal {
+    width: 48px;
+    height: 48px;
+  }
+  .geo-heal::before,
+  .geo-heal::after {
+    content: "";
+    position: absolute;
+    border-radius: 6px;
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent) 60%, #fff),
+      var(--accent)
+    );
+  }
+  .geo-heal::before {
+    top: 16px;
+    left: 0;
+    width: 48px;
+    height: 16px;
+  }
+  .geo-heal::after {
+    top: 0;
+    left: 16px;
+    width: 16px;
+    height: 48px;
+  }
+
+  /* 火焰：黄到橙红的不规则火苗，持续抖动 */
+  .geo-fire {
+    width: 46px;
+    height: 62px;
+    background: linear-gradient(180deg, #ffe66b 0%, #ff9a3c 42%, #ff3d5a 100%);
+    clip-path: polygon(
+      50% 0,
+      64% 20%,
+      78% 36%,
+      92% 58%,
+      84% 82%,
+      64% 100%,
+      36% 100%,
+      16% 82%,
+      8% 58%,
+      22% 36%,
+      36% 20%
+    );
+    animation: flicker 1.8s ease-in-out infinite;
+    transform-origin: 50% 100%;
+  }
+
+  /* 冰霜：两条渐变十字 + 旋转 45° 的斜向残影 */
+  .geo-ice {
+    width: 54px;
+    height: 54px;
+    background:
+      linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat,
+      linear-gradient(var(--accent), var(--accent)) center / 100% 2px no-repeat;
+  }
+  .geo-ice::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: inherit;
+    transform: rotate(45deg);
+  }
+  .geo-ice::after {
+    content: "";
+    position: absolute;
+    inset: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* 暗蚀：亮紫到深紫的球体 + 旋转虚线光环 */
+  .geo-dark {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 34% 28%,
+      #efd7ff 0%,
+      var(--accent) 30%,
+      #4a1270 68%,
+      #120018 100%
+    );
+  }
+  .geo-dark::before {
+    content: "";
+    position: absolute;
+    top: -11px;
+    left: -11px;
+    width: 74px;
+    height: 74px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 70%, transparent);
+    border-radius: 50%;
+    animation: spin 10s linear infinite;
+  }
+
+  /* 闪电链接：折线闪电 */
+  .geo-lightningLink {
+    width: 26px;
+    height: 58px;
+    background: linear-gradient(180deg, #fff, var(--accent));
+    clip-path: polygon(56% 0, 8% 45%, 44% 45%, 30% 100%, 94% 52%, 56% 52%);
+  }
+
+  /* 命中裂变：中心弹丸 + 三颗飞散碎片 */
+  .geo-hitFission {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow:
+      0 -24px 0 -4px var(--accent),
+      21px 14px 0 -4px var(--accent),
+      -21px 14px 0 -4px var(--accent);
+  }
+
+  /* 追踪：缺口圆环 + 指向箭头 */
+  .geo-homing {
+    width: 54px;
+    height: 54px;
+    border: 4px solid var(--accent);
+    border-left-color: transparent;
+    border-radius: 50%;
+    transform: rotate(35deg);
+  }
+  .geo-homing::after {
+    content: "";
+    position: absolute;
+    top: -10px;
+    left: 50%;
+    margin-left: -8px;
+    border: 8px solid transparent;
+    border-bottom: 14px solid var(--accent);
+  }
+
+  /* 回旋：粗 U 形回旋镖 */
+  .geo-boomerangCore {
+    width: 50px;
+    height: 50px;
+    border: 7px solid var(--accent);
+    border-top-color: transparent;
+    border-right-color: transparent;
+    border-radius: 50%;
+    transform: rotate(45deg);
+  }
+
+  /* 元素混合：两颗交叠的元素球 */
+  .geo-elementMix::before,
+  .geo-elementMix::after {
+    content: "";
+    position: absolute;
+    top: 12px;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #fff, var(--accent) 45%, transparent 72%);
+  }
+  .geo-elementMix::before {
+    left: 0;
+  }
+  .geo-elementMix::after {
+    right: 0;
+    mix-blend-mode: screen;
+    filter: hue-rotate(150deg);
+  }
+
+  /* 嗜血：旋转的水滴 */
+  .geo-bloodthirst {
+    width: 42px;
+    height: 42px;
+    border-radius: 50% 50% 50% 0;
+    background: linear-gradient(135deg, #ffb0b0, var(--accent));
+    transform: rotate(-45deg);
+  }
+
+  /* 入场：从下方淡入并轻微放大 */
+  @keyframes card-in {
+    from {
+      opacity: 0;
+      transform: translateY(30px) scale(0.94);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  /* 火焰抖动 */
+  @keyframes flicker {
+    0%,
+    100% {
+      transform: scale(1) skewX(0deg);
+    }
+    25% {
+      transform: scale(1.04, 0.96) skewX(-2deg);
+    }
+    50% {
+      transform: scale(0.97, 1.05) skewX(2deg);
+    }
+    75% {
+      transform: scale(1.02, 0.98) skewX(-1deg);
+    }
+  }
+
+  /* 暗球光环旋转 */
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* ---- 第十一阶段：遗物装配室（自动攻击按钮样式见顶部 HUD 按钮组） ---- */
+
+  /* 装配室整屏遮罩：游戏暂停在 route 状态，玩家慢慢换装 */
+  #route-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 32;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 24px;
+    font-family: "Courier New", monospace;
+    color: #d8ecff;
+    background: rgba(4, 6, 11, 0.86);
+  }
+  #route-panel.hidden {
+    display: none;
+  }
+  #route-panel h2 {
+    margin: 0;
+    font-size: 24px;
+    letter-spacing: 3px;
+    color: #9ff7ff;
+    text-shadow: 0 0 12px rgba(57, 246, 255, 0.6);
+  }
+  #route-panel h3 {
+    margin: 4px 0 0;
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: #7fd8ff;
+  }
+
+  /* 4 个槽位：普通 I/II/III + 特殊 */
+  #route-slots {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 14px;
+    max-width: calc(100vw - 48px);
+  }
+  .route-slot {
+    width: 150px;
+    min-height: 108px;
+    padding: 8px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px dashed rgba(127, 216, 255, 0.35);
+  }
+  .route-slot.over {
+    border-color: #39f6ff;
+    background: rgba(57, 246, 255, 0.08);
+    box-shadow: 0 0 10px rgba(57, 246, 255, 0.35);
+  }
+  .route-slot-head {
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: #7fd8ff;
+  }
+
+  /* 可拖拽的小遗物卡 */
+  .route-relic {
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    cursor: grab;
+    background: rgba(8, 12, 18, 0.9);
+    border-left: 3px solid var(--accent);
+  }
+  .route-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .route-relic strong {
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .route-relic span {
+    font-size: 10px;
+    color: #9fb6c9;
+  }
+  /* 装配室图标：30px 内联 SVG，只留一圈干净的光晕，不用模糊阴影 */
+  .route-geo {
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    display: block;
+    filter: drop-shadow(0 0 4px var(--accent));
+  }
+  .route-relic .route-geo {
+    color: var(--accent);
+  }
+  .route-geo svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* 备选库 */
+  #route-backup {
+    width: min(640px, calc(100vw - 48px));
+    min-height: 64px;
+    padding: 10px;
+    box-sizing: border-box;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px dashed rgba(127, 216, 255, 0.25);
+  }
+  .route-empty {
+    width: 100%;
+    padding: 10px;
+    font-size: 11px;
+    color: #5f7486;
+    text-align: center;
+  }
+
+  #route-continue {
+    padding: 10px 28px;
+    font-family: "Courier New", monospace;
+    font-size: 14px;
+    letter-spacing: 2px;
+    color: #eafdff;
+    background: rgba(4, 6, 11, 0.9);
+    border: 1px solid #39f6ff;
+    cursor: pointer;
+  }
+  #route-continue:hover {
+    background: rgba(57, 246, 255, 0.12);
+  }
+
+  /* F2 面板主体：科技感背景与边框 */
+  #debug-panel {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    z-index: 100; width: 800px; padding: 4px 6px;
+    font-family: "Consolas", monospace; color: #d8ecff;
+    background: 
+      linear-gradient(rgba(57, 246, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(57, 246, 255, 0.03) 1px, transparent 1px),
+      rgba(8, 12, 20, 0.3);
+    background-size: 20px 20px; /* 增加细微网格背景 */
+    border: 1px solid rgba(57, 246, 255, 0.4);
+    box-shadow: 0 0 20px rgba(57, 246, 255, 0.15), inset 0 0 20px rgba(57, 246, 255, 0.05);
+    backdrop-filter: blur(5px);
+    user-select: none;
+  }
+  #debug-panel.hidden { display: none; }
+
+  /* 标题栏 */
+  .debug-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding-bottom: 4px; margin-bottom: 4px;
+    border-bottom: 2px solid rgba(57, 246, 255, 0.3);
+  }
+  .dbg-title { font-size: 15px; font-weight: bold; color: #39f6ff; text-shadow: 0 0 10px rgba(57, 246, 255, 0.6); letter-spacing: 2px; }
+  .dbg-hint { font-size: 11px; color: #8fd8f5; }
+  .keycap { padding: 2px 6px; border: 1px solid #39f6ff; border-radius: 4px; background: rgba(57, 246, 255, 0.1); font-weight: bold; }
+
+  /* 三列布局 */
+  .debug-body { display: flex; flex-direction: row; align-items: stretch; gap: 16px; }
+  .dbg-col { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+  .dbg-col h3 { margin: 0; font-size: 11px; color: #7fd8ff; border-left: 3px solid #39f6ff; padding-left: 6px; }
+  .dbg-slots {border-right: 1px dashed rgba(57, 246, 255, 0.2);
+    padding-right: 16px;
+    flex: 0 0 340px; /* 固定宽度，给三个横排槽位留出空间 */ }
+  .dbg-specials { border-left: 1px dashed rgba(57, 246, 255, 0.2); padding-left: 16px; }
+
+  /* 槽位区：横排三格，每格等宽，给遗物名和加减按钮留出空间 */
+  #debug-slots {  display: flex;
+     flex-direction: row;
+    gap: 8px;
+    width: 100%; }
+  .debug-slot {
+    flex: 1;             /* 三个槽位自动等宽平分 */
+    min-width: 0;        /* 防止内容撑破容器 */
+    box-sizing: border-box;
+    min-height: 80px;    /* 给足够的高度 */
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center; /* 让内部的物品和文字居中 */
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px dashed rgba(57, 246, 255, 0.5);
+    font-size: 11px;
+    color: #aec4d4;
+    white-space: normal;
+    transition: all 0.2s;
+  }
+  /* 限制放入槽位后的物品不要无限拉宽 */
+  .debug-slot .dbg-item {
+    width: fit-content;       /* 宽度由内容撑开，不要拉满整个槽位 */
+    max-width: 100%;          /* 最大不超过槽位 */
+    justify-content: center;  /* 让文字和加减号紧凑居中 */
+    gap: 6px;                 /* 文字和加减号之间的间距 */
+    box-sizing: border-box;
+  }
+
+  /* 如果文字太长，让它正常省略，不要挤坏加减号 */
+  .debug-slot .dbg-name {
+    flex: 0 1 auto;
+    max-width: 80px;
+    white-space: normal;      /* 槽内只有约 100px，等级允许换到第二行，避免被省略 */
+    text-align: center;
+    line-height: 1.2;
+  }
+  .debug-slot.over { border-color: #39f6ff; background: rgba(57, 246, 255, 0.15); box-shadow: 0 0 12px rgba(57, 246, 255, 0.4); }
+  .debug-slot:not(:empty) { border-style: solid; background: rgba(57, 246, 255, 0.08); color: #fff; box-shadow: inset 0 0 10px rgba(57, 246, 255, 0.2); }
+
+  /* 备选库与特殊遗物：单列，保证完整名字 + 等级 + 加减按钮都放得下 */
+  .debug-library, .debug-specials-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  .dbg-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 4px;
+    width: 100%; min-width: 0; padding: 2px 2px 4px 4px;
+    font-family: inherit; font-size: 11px; color: #b9e9f5;
+    background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(57, 246, 255, 0.3);
+    cursor: grab; user-select: none; transition: all 0.15s;
+  }
+  .dbg-item:hover { background: rgba(57, 246, 255, 0.15); border-color: #39f6ff; color: #fff; box-shadow: 0 0 8px rgba(57, 246, 255, 0.3); }
+  .dbg-item:active { cursor: grabbing; }
+  .dbg-item.dragging { opacity: 0.35; }
+  .dbg-name {
+    flex: 1; min-width: 0; text-align: left;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-weight: bold; color: #eaffff;
+  }
+  .dbg-steppers { display: flex; flex: 0 0 auto; gap: 2px; }
+  .dbg-step {
+    width: 10px; height: 12px; padding: 0; line-height: 1;
+    font-family: monospace; font-size: 10px; font-weight: bold;
+    color: #39f6ff; background: rgba(57, 246, 255, 0.08);
+    border: 1px solid rgba(57, 246, 255, 0.4); cursor: pointer;
+  }
+  .dbg-step:hover { color: #001018; background: #39f6ff; box-shadow: 0 0 6px #39f6ff; }
+
+  /* 底部操作栏 */
+  .debug-actions {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 6px; padding-top: 6px; border-top: 2px solid rgba(57, 246, 255, 0.3);
+  }
+  .dbg-actions-left, .dbg-actions-right { display: flex; gap: 10px; }
+  .dbg-actions-left button { padding: 4px 12px; font-family: inherit; font-size: 12px; color: #39f6ff; background: rgba(57, 246, 255, 0.1); border: 1px solid #39f6ff; cursor: pointer; }
+  .dbg-actions-left button:hover { background: rgba(57, 246, 255, 0.25); box-shadow: 0 0 10px rgba(57, 246, 255, 0.4); }
+  
+  /* 破坏性操作：幽灵按钮 */
+  .dbg-actions-right button { padding: 6px 16px; font-family: inherit; font-size: 12px; color: #ff9b9b; background: transparent; border: 1px solid rgba(255, 90, 90, 0.5); cursor: pointer; }
+  .dbg-actions-right button:hover { background: rgba(255, 90, 90, 0.2); border-color: #ff5a5a; color: #fff; }
+  #debug-sandbox.on { color: #000; background: #39f6ff; font-weight: bold; box-shadow: 0 0 12px #39f6ff; }
+
+  .debug-slot.empty { border-style: dashed; background: rgba(0, 0, 0, 0.4); color: #aec4d4; box-shadow: none; }
+  .debug-slot-head { font-size: 11px; color: #7fd8ff; }
+  .debug-empty { font-size: 11px; color: #6f8fa3; }

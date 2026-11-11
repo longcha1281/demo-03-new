@@ -123,6 +123,7 @@ export const G = {
   autoAttack: true,                    // 自动攻击开关（右上角按钮切换）
   mouseDown: false,                    // 手动模式下鼠标左键是否按着
   lightningCD: 0,                      // 闪电链接的公共冷却（秒）
+  isSandbox: false,                    // F2 沙盒模式：不掉血、清房不结算
 
   roomSpawnPlan: [],                   // 本房怪物类型序列
   roomSpawnIndex: 0,                   // 已取到第几个

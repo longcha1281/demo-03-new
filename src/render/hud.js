@@ -50,8 +50,9 @@ const HUD_STYLE = {
 // 右上角两个 Canvas 按钮的点击范围（逻辑坐标）。
 // main.js 用同一份数据做命中判定，避免画的位置和点的位置对不上。
 export const HUD_BUTTONS = {
-  auto: { x: 740, y: 25, w: 150, h: 20 },
-  fullscreen: { x: 896, y: 25, w: 54, h: 20 },
+  // 两个按钮都右对齐到 950，跟上面数据行同一个右边线，不再横跨半个屏幕
+  auto: { x: 784, y: 24, w: 106, h: 14 },
+  fullscreen: { x: 896, y: 24, w: 54, h: 14 },
 };
 
 /**
@@ -189,7 +190,7 @@ export function drawHud() {
     }
   ];
 
-  ctx.font = `11px ${font}`;
+  ctx.font = `10px ${font}`;
   ctx.textAlign = 'left';
 
   let statsWidth = 0;
@@ -202,23 +203,46 @@ export function drawHud() {
 
   for (let i = 0; i < stats.length; i++) {
     ctx.fillStyle = stats[i].color;
-    ctx.fillText(stats[i].text, statsX, 15);
+    ctx.fillText(stats[i].text, statsX, 14);
     statsX += hudTextWidth(stats[i].text);
   }
 
   // ======================================
   // 3. 右上：纯文字按钮，没有矩形框
+  // 紧贴数据行下方、右对齐到数据行右边界；宽度按实际文字算，
+  // 写回 HUD_BUTTONS，保证 main.js 的命中区和画出来的文字重合
   // ======================================
+
+  const autoLabel = `[ 自动：${G.autoAttack ? '开' : '关'} ]`;
+  const fsLabel = '[ 全屏 ]';
+
+  ctx.font =
+    '10px "Consolas", "Courier New", monospace';
+  const autoW = hudTextWidth(autoLabel);
+  const fsW = hudTextWidth(fsLabel);
+
+  HUD_BUTTONS.fullscreen = {
+    x: 950 - fsW,
+    y: 20,
+    w: fsW,
+    h: 14,
+  };
+  HUD_BUTTONS.auto = {
+    x: HUD_BUTTONS.fullscreen.x - 10 - autoW,
+    y: 20,
+    w: autoW,
+    h: 14,
+  };
 
   drawHudTextButton(
     HUD_BUTTONS.auto,
-    `[ 自动攻击：${G.autoAttack ? '开' : '关'} ]`,
+    autoLabel,
     G.autoAttack
   );
 
   drawHudTextButton(
     HUD_BUTTONS.fullscreen,
-    '[ 全屏 ]',
+    fsLabel,
     true
   );
 

@@ -25,7 +25,6 @@ import {
   PICKUP,
 } from '../config.js';
 import { G } from './state.js';
-import { sfxHurt } from './audio.js';
 import {
   damageEnemy,
   spawnHostileShot,
@@ -389,12 +388,7 @@ export function updateEnemies(dt) {
     const hitDx = p.x - e.x;
     const hitDy = p.y - e.y;
     if (Math.hypot(hitDx, hitDy) < e.r + PLAYER.radius && p.inv <= 0) {
-      p.hp -= PLAYER.hurtDamage;         // 受击统一扣固定伤害
-      p.hits++;                          // 记一次被打中
-      p.inv = PLAYER.hurtInv;            // 给一段无敌，避免一帧被多只怪连续扣血
-      p.hurtFlash = PLAYER.hurtInv;      // 只有真受伤才闪红晕，冲刺无敌不闪
-      sfxHurt();                         // 受伤音效（低频"嗡"）
-      G.roomHurt = true;                 // 本房被击中，无伤奖励没了
+      hurtPlayer(); // 统一受伤入口：沙盒模式不掉血
     }
   }
 }

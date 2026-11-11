@@ -400,7 +400,7 @@ const SFX_RECIPES = {
       wave: 'sine',
       from: 72,
       dur: 0.45,
-      env: { peak: 0.3, attack: 0.05, decay: 0.1, sustain: 0.35, release: 0.3 },
+      env: { peak: 0.6, attack: 0.05, decay: 0.1, sustain: 0.35, release: 0.3 },
       lfo: { rate: 8, depth: 6 },
     },
     {
@@ -408,7 +408,7 @@ const SFX_RECIPES = {
       wave: 'sawtooth',
       from: 110,
       dur: 0.45,
-      gain: 0.06,
+      gain: 0.12,
     },
     {
       kind: 'tone',
@@ -416,8 +416,24 @@ const SFX_RECIPES = {
       from: 120,
       to: 45,
       dur: 0.2,
-      gain: 0.3,
+      gain: 0.6,
     },
+    // 👇 4. 新增：中频穿透层（让小喇叭能发声）
+    {
+      kind: 'tone',
+      wave: 'square',         // 方波带有极强的泛音
+      from: 220,              // 和 72Hz 形成谐波关系
+      to: 180,
+      dur: 0.2,               // 短促
+      gain: 0.25,             // 音量不用大，刚好能听到就行
+    },
+    // 👇 5. 新增：高频受击噪声（模拟撕裂感）
+    {
+      kind: 'noise',
+      dur: 0.08,
+      filter: { type: 'highpass', from: 4000, to: 2000 },
+      gain: 0.3,
+    }
   ],
 };
 

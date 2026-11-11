@@ -23,11 +23,13 @@ import {
   LIGHTNING_FX,
   FISSION_FX,
   PICKUP,
+  SPELL,
 } from '../config.js';
 import { G } from './state.js';
-import { sfxShoot, sfxHit, sfxKill, sfxHurt } from './audio.js';
+import { sfxShoot, sfxHit, sfxKill } from './audio.js';
 import { applyBulletEnchant } from './enchant.js';
-import { relicLevel, spawnPickup, applyLifesteal } from './player.js';
+import { relicLevel, spawnPickup, applyLifesteal, hurtPlayer } from './player.js';
+import { compileCastData } from './spell.js';
 import { onEnemyDeath } from './enemy.js';
 import {
   spawnSiegeBreakVolley,
@@ -172,12 +174,8 @@ export function updateHostile(dt) {
       // 只有虚空大球会分裂；小球只带 voidChild，不会继续分裂
       const splitsIntoChildren = h.voidOrb && !h.voidChild;
 
-      p.hp -= PLAYER.hurtDamage;
-      p.hits++;
-      p.inv = PLAYER.hurtInv;
-      p.hurtFlash = PLAYER.hurtInv;
-      sfxHurt();
-      G.roomHurt = true;
+      // 统一受伤入口：沙盒模式在这里被拦截，子弹仍然正常消失
+      hurtPlayer();
       G.hostile.splice(i, 1);
 
       // 在命中点分裂成 2 发小球
@@ -299,23 +297,64 @@ export function updateLightningArcs(dt) {
  * 子弹带 child=true，之后不再触发任何遗物 / 附魔 / 阈值。
  */
 export function buildFissionBullets(shot, hitEnemy) {
-  const level = relicLevel('hitFission');
+  // 裂变代数到 2（母弹 0 → 子 1 → 孙 2）就彻底停手，避免几何级数套娃
+  if ((shot.depth || 0) >= SPELL.MAX_FISSION_DEPTH) return null;
+
+  // 优先用开火时记下的等级；手动构造的旧子弹再回退到当前遗物等级
+  const level = shot.fissionLevel || relicLevel('hitFission');
   if (!level) return null;
 
   const cfg = WEAPON.FISSION[level - 1];
 
-  // 父弹速度方向；极端情况下速度为 0，就退回"从父弹指向受击点"
-  const speed = Math.hypot(shot.vx, shot.vy);
+  // 父弹速度方向；极端情况下速度为 0，就退回"从父弹指向受击点"。
+  // 子代沿用父弹的速度大小，这样回旋/追踪改造过的弹道不会被重置成基础速度。
+  const parentSpeed = Math.hypot(shot.vx, shot.vy);
   const baseAngle =
-    speed > 0
+    parentSpeed > 0
       ? Math.atan2(shot.vy, shot.vx)
       : Math.atan2(hitEnemy.y - shot.y, hitEnemy.x - shot.x);
+  const childSpeed = parentSpeed > 0 ? parentSpeed : SHOT.SPEED;
 
-  const step = cfg.count > 1 ? (cfg.spread * 2) / (cfg.count - 1) : 0;
+  // 裂变基础发数：由裂变遗物等级决定（Lv1=2、Lv2=3、Lv3=4）
+  const fissionBaseCount = cfg.count;
+
+  // 散射等级决定“裂变之后还要再乘几发”（Lv1=2、Lv2=3、Lv3=5；没装则按 1 发）
+  const scatterLv = relicLevel('tripleShot') || 0;
+  const scatterCount = scatterLv > 0
+    ? WEAPON.TRIPLE_SHOT[scatterLv - 1].count
+    : 1;
+
+  // 裂变快照 + 最终数量：这两个数一比较，就知道散射排在裂变前还是后。
+  const snapshotCount = shot.fissionCount || 0;
+  const finalCount = shot.castCount || shot.count || 0;
+  const scatterAfterFission = finalCount > snapshotCount;
+
+  // 真正的乘法：散射排在裂变后面时，裂变发数 × 散射发数
+  let childCount = fissionBaseCount;
+  if (scatterAfterFission) {
+    childCount = fissionBaseCount * scatterCount;
+  }
+
+  // 防卡死护栏 1：单次裂变最高只爆 8 发，绝不允许几何级数继续放大
+  childCount = Math.min(SPELL.FISSION_MAX_COUNT, Math.max(1, childCount));
+
+  // 子代张角优先用裂变那一刻的快照；没有快照时退回等级配置。
+  const childSpread =
+    shot.fissionSpread > 0 ? shot.fissionSpread : cfg.spread;
+  // 防卡死护栏 2：子代绝对不继承 fission 标签，彻底掐断无限套娃
+  const inheritedTags = (shot.tags || []).filter((t) => t !== 'fission');
+  const childHitsLeft = inheritedTags.includes('pierce')
+    ? 1 + SPELL.PIERCE_BONUS
+    : 1;
+  const childLife = shot.isLightning
+    ? SHOT.LIFE * SPELL.LIGHTNING_LIFE_MUL
+    : cfg.life;
+
+  const step = childCount > 1 ? (childSpread * 2) / (childCount - 1) : 0;
   const out = [];
 
-  for (let i = 0; i < cfg.count; i++) {
-    const angle = baseAngle - cfg.spread + step * i;
+  for (let i = 0; i < childCount; i++) {
+    const angle = baseAngle - childSpread + step * i;
     const damage = shot.baseDamage * cfg.damageMul;
 
     out.push({
@@ -326,19 +365,35 @@ export function buildFissionBullets(shot, hitEnemy) {
       y:
         hitEnemy.y +
         (Math.random() * 2 - 1) * FISSION_FX.SPAWN_OFFSET,
-      vx: Math.cos(angle) * SHOT.SPEED,
-      vy: Math.sin(angle) * SHOT.SPEED,
-      life: cfg.life,
+      vx: Math.cos(angle) * childSpeed,
+      vy: Math.sin(angle) * childSpeed,
+      life: childLife,
       damage,
       baseDamage: damage,
-      hitsLeft: 1,
+      // 带穿透标签的子代重新获得完整穿透次数，可以一路命中、一路裂变
+      hitsLeft: childHitsLeft,
+      pierceDamageMul: shot.pierceDamageMul || 1,
+      hasPierce: inheritedTags.includes('pierce'),
       hitCount: 0,
       hitIds: new Set(),
       // 出生保护：刚生成时忽略刚打中的敌人，并短暂不参与任何碰撞
       ignoreEnemyId: hitEnemy.id,
       spawnInvulnerability: FISSION_FX.SPAWN_INVULN,
       color: shot.color,
-      child: true, // 子子弹：不再触发遗物 / 附魔 / 计数
+      tags: inheritedTags, // 子代继承追踪 / 穿透 / 裂变标签
+      depth: (shot.depth || 0) + 1,    // 裂变代数 +1
+      fissionLevel: level,              // 子代沿用同一裂变等级
+      // 快照和最终数量也一起继承，孙代才能继续按同样顺序做乘法
+      fissionCount: snapshotCount,
+      fissionSpread: shot.fissionSpread || 0,
+      castCount: finalCount,
+      castSpread: shot.castSpread || 0,
+      // 母弹的闪电形态必须传给子代，子代才是"雷电追踪弹"
+      isLightning: !!shot.isLightning,
+      // 追踪参数继承；回旋的整套状态机不继承，子代只保留飞行弹道
+      homingRange: shot.homingRange,
+      homingTurn: shot.homingTurn,
+      child: true, // 子子弹：不再触发附魔 / 汲取 / 闪电，只保留裂变链
     });
   }
 
@@ -348,6 +403,10 @@ export function buildFissionBullets(shot, hitEnemy) {
 /** 把算好的裂变子弹立刻放进场上（同一帧可见），并受硬上限裁剪。 */
 export function pushFissionBullets(bullets) {
   if (!bullets || bullets.length === 0) return;
+
+  // 防卡死护栏 3：场上子弹已经超过 150 发时，拒绝再加入新的子代
+  if (G.shots.length > 150) return;
+
   for (const b of bullets) G.shots.push(b);
 
   // 子子弹同样受玩家子弹硬上限约束
@@ -359,7 +418,8 @@ export function pushFissionBullets(bullets) {
 /**
  * f. 自动 / 手动攻击：冷却好了就开火。
  * 自动：锁定(存活) > 首领 > 最近；手动：锁定(存活) > 鼠标瞄准点。
- * 三向散射按等级决定发数与伤害；穿透按等级决定可命中数。
+ * 开火完全由 compileCastData 的数据包决定：母弹数看裂变快照，闪电换高速短命弹，
+ * 穿透/追踪/回旋只挂标签，具体参数按遗物等级读取。
  * @param {number} dt 秒（签名统一，暂未用到）
  */
 export function updateAttack(dt) {
@@ -436,43 +496,75 @@ export function updateAttack(dt) {
   else if (p.core === 'ice') shotColor = COLORS.ice;
   else if (p.core === 'dark') shotColor = COLORS.dark;
 
-  // 三向散射：等级决定发数 / 偏移 / 每发伤害倍率；没装备就是单发满伤
-  const tripleLevel = relicLevel('tripleShot');
-  const tripleCfg = tripleLevel ? WEAPON.TRIPLE_SHOT[tripleLevel - 1] : null;
+  // 法术编译器：遍历 0→1→2 号槽位，把遗物翻译成最终数据包。
+  // 开火这里不再逐个判断"有没有三向散射/穿透/回旋"。
+  const castData = compileCastData(p);
+  const tags = castData.tags;
 
-  // 穿透：等级决定可命中数，以及第 2 次起的伤害倍率
-  const pierceLevel = relicLevel('piercing');
-  const pierceCfg = pierceLevel ? WEAPON.PIERCE[pierceLevel - 1] : null;
+  // 标签决定"有没有这个效果"，等级决定"具体参数多强"
+  const hasPierce = tags.includes('pierce');
+  const hasBoomerang = tags.includes('boomerang');
+  const hasHoming = tags.includes('homing');
 
-  // 回旋镖：所有主弹都变成回旋镖
-  const boomerangLevel = relicLevel('boomerangCore');
-  const boomerangCfg = boomerangLevel ? WEAPON.BOOMERANG : null;
+  const pierceLevel = castData.levels.piercing || 0;
+  const pierceCfg =
+    hasPierce && pierceLevel ? WEAPON.PIERCE[pierceLevel - 1] : null;
 
-  // 追踪：记录转向参数，updateShots 每帧调用
-  const homingLevel = relicLevel('homing');
-  const homingCfg = homingLevel ? WEAPON.HOMING[homingLevel - 1] : null;
+  const boomerangLevel = castData.levels.boomerangCore || 0;
+  const boomerangCfg =
+    hasBoomerang && boomerangLevel ? WEAPON.BOOMERANG : null;
 
-  const count = tripleCfg ? tripleCfg.count : 1;
+  const homingLevel = castData.levels.homing || 0;
+  const homingCfg =
+    hasHoming && homingLevel ? WEAPON.HOMING[homingLevel - 1] : null;
+
+  // 母弹只发裂变快照里的数量：
+  // 先裂变后散射 → 快照 1，只发 1 发母弹，散射留给命中后的子代；
+  // 先散射后裂变 → 快照 3，先发 3 发母弹，每颗各自裂变。
+  const spawnCount =
+    castData.fissionCount > 0 ? castData.fissionCount : castData.count;
+  const count = Math.min(SPELL.CAST_MAX_COUNT, spawnCount);
+  const step = count > 1 ? castData.spread : 0;
+
+  // 闪电形态：高速、短寿命；子代会继承这个形态。
+  const isLightning = castData.form === 'lightning';
+  const baseSpeed = isLightning
+    ? SHOT.SPEED * SPELL.LIGHTNING_SPEED_MUL
+    : (castData.speed ?? SHOT.SPEED);
+  const baseLife = isLightning
+    ? SHOT.LIFE * SPELL.LIGHTNING_LIFE_MUL
+    : SHOT.LIFE;
 
   for (let k = 0; k < count; k++) {
-    const offset = tripleCfg ? tripleCfg.offsets[k] : 0;
-    const mul = tripleCfg ? tripleCfg.muls[k] : 1;
+    // 扇形以瞄准方向为中心左右均分；只有 1 发时不分叉
+    const offset = count > 1 ? (k - (count - 1) / 2) * step : 0;
     const angle = baseAngle + offset;
-    const damage = p.damage * mul;
+    const damage = castData.damage ?? p.damage;
 
     const shot = {
       x: p.x,
       y: p.y,
-      vx: Math.cos(angle) * SHOT.SPEED,
-      vy: Math.sin(angle) * SHOT.SPEED,
-      life: SHOT.LIFE,
+      vx: Math.cos(angle) * baseSpeed,
+      vy: Math.sin(angle) * baseSpeed,
+      life: baseLife,
       damage,
       baseDamage: damage,
-      hitsLeft: pierceCfg ? pierceCfg.hits : 1,
+      // 穿透是标签效果：总命中数 = 1 + 固定额外次数
+      hitsLeft: hasPierce ? 1 + SPELL.PIERCE_BONUS : 1,
       hitCount: 0,
       pierceDamageMul: pierceCfg ? pierceCfg.damageMul : 1,
+      hasPierce,
       hitIds: new Set(), // 已经打过的敌人 id，防止穿透时重复结算
       color: shotColor,
+      tags: castData.tags,       // 效果标签，命中结算按它判断
+      depth: 0,                  // 裂变代数：母弹 0
+      isLightning,               // 闪电形态，命中后传给子代
+      fissionLevel: castData.levels.hitFission || 0,
+      // 裂变快照 + 最终数量/张角：命中时用它们判断“散射到底在裂变前还是后”
+      fissionCount: castData.fissionCount,
+      fissionSpread: castData.fissionSpread,
+      castCount: castData.count,
+      castSpread: castData.spread,
       child: false,
     };
 
@@ -502,7 +594,7 @@ export function updateAttack(dt) {
       const extraLife =
         (boomerangCfg.BUFFER_DIST +
           boomerangCfg.FREE_DIST * shot.rangeMul) /
-        SHOT.SPEED;
+        baseSpeed;
       shot.life = Math.max(shot.life, SHOT.LIFE + extraLife);
     } else if (homingCfg) {
       // 普通追踪弹：只记追踪参数，updateShots 里每帧调用
@@ -601,13 +693,13 @@ export function nearestUnhitEnemy(x, y, exclude, range) {
   return nearest;
 }
 
-/** 返程到家：不再删除，一律进入缓冲直飞；之后由 enterHomingFree 决定索敌还是收尾。 */
+/** 返程到家：进入缓冲直飞；缓冲结束后有追踪才继续索敌，没有追踪就销毁。 */
 export function finishBoomerangReturn(s) {
   s.phase = 'BUFFER';
   s.bufferTraveled = 0;
 }
 
-/** 缓冲飞满：统一进入游离段，有没有目标交给后续飞行判断。 */
+/** 缓冲飞满且带追踪：进入游离段，重新索敌。 */
 export function enterHomingFree(s) {
   s.phase = 'HOMING_FREE';
   s.freeTraveled = 0;
@@ -675,8 +767,12 @@ export function moveBoomerang(s, dt) {
     s.bufferTraveled += speed * dt;
 
     if (s.bufferTraveled >= cfg.BUFFER_DIST) {
-      // 飞满缓冲一律进入游离段；纯回旋也进去，只是之后保持直线
-      enterHomingFree(s);
+      // 缓冲结束：带追踪才进入游离索敌；纯回旋直接销毁，不再直线乱飞
+      if (s.hasHoming) {
+        enterHomingFree(s);
+      } else {
+        s.done = true;
+      }
     }
     return;
   }
@@ -819,8 +915,13 @@ export function updateShots(dt) {
 
         sfxHit(); // 命中音效（短促"扑"）
 
-        // 裂变参数先算好，父弹处理完再同一帧 push
-        const fission = s.child ? null : buildFissionBullets(s, e);
+        // 裂变参数先算好，父弹处理完再同一帧 push。
+        // 子代只要还带 fission 标签且 depth < 2，就允许再裂一次。
+        const canFission =
+          s.tags &&
+          s.tags.includes('fission') &&
+          (s.depth || 0) < SPELL.MAX_FISSION_DEPTH;
+        const fission = canFission ? buildFissionBullets(s, e) : null;
 
         // 子子弹只是伤害，不再触发遗物 / 附魔 / 阈值
         if (!s.child) {

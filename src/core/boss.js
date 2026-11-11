@@ -25,9 +25,9 @@ import {
   PICKUP,
 } from '../config.js';
 import { G } from './state.js';
-import { sfxHurt } from './audio.js';
 import { spawnEnemy, enemyStats, takeEnemyId } from './enemy.js';
 import { spawnHostileShot } from './combat.js';
+import { hurtPlayer } from './player.js';
 
 /**
  * 第 n 只首领的血量：config.BOSS.HP 里的公式，最后乘倍率并封顶。
@@ -760,12 +760,7 @@ export function updateBossHazards(dt) {
     }
 
     if (hit) {
-      p.hp -= PLAYER.hurtDamage;
-      p.hits++;
-      p.inv = PLAYER.hurtInv;
-      p.hurtFlash = PLAYER.hurtInv;
-      sfxHurt();
-      G.roomHurt = true;
+      hurtPlayer(); // 统一受伤入口：沙盒模式不掉血
     }
   }
 }

@@ -63,6 +63,10 @@ export function relicLevel(id) {
  */
 export function hurtPlayer() {
   const p = G.p;
+
+  // 沙盒模式：伤害判定照常发生（子弹会消失、自爆会触发），但血量永远不掉
+  if (G.isSandbox) return false;
+
   if (p.inv > 0) return false;
 
   p.hp -= PLAYER.hurtDamage;

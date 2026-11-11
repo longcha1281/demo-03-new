@@ -163,7 +163,7 @@ export function drawLockOn() {
   const target = G.enemies.find((e) => e.id === p.attackTarget && e.hp > 0);
   if (!target) return;
 
-  const R = target.r + 16;
+  const R = target.r + 6;
   const color = '#39f6ff';
 
   ctx.save();
@@ -172,7 +172,7 @@ export function drawLockOn() {
   ctx.shadowBlur = 10;
 
   // 四角 L 形括号：沿对角线找角点，再各伸出 8px 的横/竖臂
-  const arm = 8;
+  const arm = 3;
   const diag = R * 0.70710678;
   const corners = [
     [-1, -1],

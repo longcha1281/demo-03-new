@@ -10,8 +10,9 @@
 // ============================================================
 
 import { G } from './core/state.js';
-import { CANVAS } from './config.js';
+import { CANVAS, LIMITS } from './config.js';
 import { initCanvas, draw, HUD_BUTTONS } from './render/canvas.js';
+import { spawnEnemy } from './core/enemy.js';
 import {
   update,
   setKey,
@@ -84,7 +85,7 @@ document.addEventListener('fullscreenchange', () => {
 
   if (justExited) {
     lastFullscreenExitAt = Date.now();
-    if (!skipPauseAfterFullscreenExit && togglePause() !== null) {
+    if (!skipPauseAfterFullscreenExit && !debugPanelOpen && togglePause() !== null) {
       syncPauseUI();
     }
     skipPauseAfterFullscreenExit = false;
@@ -102,6 +103,7 @@ const LOCK_RADIUS = 40; // 鼠标点到敌人中心的容差（px）
 
 gameCanvas.addEventListener('mousedown', (e) => {
   if (e.button !== 1) return;
+  if (e.target.closest && e.target.closest('#debug-panel')) return;
   e.preventDefault(); // 阻止中键自动滚动的默认行为
   if (G.state !== 'play') return;
 
@@ -140,6 +142,7 @@ gameCanvas.addEventListener('auxclick', (e) => {
 // ---- 3.6 鼠标瞄准 / 手动射击（第十一阶段） ----
 // mousemove 只记录逻辑坐标；左键按下才开火（autoAttack 关时由 systems 决定）
 gameCanvas.addEventListener('mousemove', (e) => {
+  if (e.target.closest && e.target.closest('#debug-panel')) return;
   const rect = gameCanvas.getBoundingClientRect();
   if (!rect.width || !rect.height) return;
   G.p.aimX = ((e.clientX - rect.left) / rect.width) * CANVAS.WIDTH;
@@ -178,6 +181,8 @@ function toggleFullscreen() {
 
 gameCanvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
+  // 调试台永远不触发开火；即使以后把面板放进画布容器也安全
+  if (e.target.closest && e.target.closest('#debug-panel')) return;
   e.preventDefault();
 
   // 先换算成 960×540 的逻辑坐标，才能和 HUD 按钮的绘制坐标对上
@@ -215,15 +220,392 @@ const btnResume = document.getElementById('btn-resume');
 const btnExitFs = document.getElementById('btn-exit-fs');
 const btnRestart = document.getElementById('btn-restart');
 
-/** 让暂停遮罩跟着游戏状态显示 / 隐藏（只有 paused 才显示），同时暂停/恢复 BGM。 */
+// F2 调试台打开时，暂停遮罩暂时让位；关闭后按原暂停状态恢复。
+let debugPanelOpen = false;
+
+/** 让暂停遮罩跟着游戏状态显示 / 隐藏（只有 paused 且调试台没开才显示），同时暂停/恢复 BGM。 */
 function syncPauseUI() {
   const paused = G.state === 'paused';
-  pauseMenu.classList.toggle('hidden', !paused);
+  pauseMenu.classList.toggle('hidden', !paused || debugPanelOpen);
   setMusicPaused(paused);
 }
 
 // 开局先同步一次（HTML 里默认就是 hidden，这里保证状态一致）
 syncPauseUI();
+
+// ---- 4.5 F2 法术调试台 ----
+// 这是一个开发工具，只改玩家槽位，不碰战斗逻辑。
+// 左侧 3 个普通槽支持拖拽互换；中间点击或拖入；右侧特殊遗物直接进 3 号槽。
+const DEBUG_RELIC_NAMES = {
+  tripleShot: '三向散射',
+  lightningLink: '闪电链接',
+  hitFission: '命中裂变',
+  homing: '追踪',
+  piercing: '穿透',
+  boomerangCore: '回旋',
+  bloodthirst: '嗜血',
+  lifesteal: '生命汲取',
+  elementMix: '元素混合',
+};
+
+// 调试台按钮从这两张表生成，名称统一查上面的 DEBUG_RELIC_NAMES，避免 HTML 和 JS 各写一份。
+const DEBUG_ORDINARY_RELICS = [
+  'tripleShot', 'lightningLink', 'hitFission',
+  'homing', 'piercing', 'boomerangCore',
+];
+const DEBUG_SPECIAL_RELICS = ['bloodthirst', 'lifesteal', 'elementMix'];
+
+// 沙盒“刷一波怪”的固定配方：8 追猎 + 4 射手 + 4 自爆蛛 + 4 分裂体 = 20 只
+const DEBUG_SANDBOX_MIX = [
+  'chaser', 'chaser', 'shooter', 'chaser', 'bomber',
+  'splitter', 'chaser', 'chaser', 'shooter', 'bomber',
+  'chaser', 'splitter', 'chaser', 'shooter', 'bomber',
+  'chaser', 'splitter', 'chaser', 'shooter', 'bomber',
+];
+
+const debugPanel = document.getElementById('debug-panel');
+const debugSlotsEl = document.getElementById('debug-slots');
+const debugLibrary = document.getElementById('debug-library');
+const debugSpecials = document.getElementById('debug-specials');
+const debugClear = document.getElementById('debug-clear');
+const debugSandbox = document.getElementById('debug-sandbox');
+const debugSpawn = document.getElementById('debug-spawn');
+const debugClearEnemies = document.getElementById('debug-clear-enemies');
+
+const DEBUG_MAX_LEVEL = 3; // 调试台允许把任意遗物调到 3 级
+let debugDragPayload = null;
+
+/** 读取调试台显示的等级：没记过就按 1 级，防止出现 0 级或 NaN。 */
+function debugRelicLevel(id) {
+  const value = Number(G.p.relicLevels[id]);
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(DEBUG_MAX_LEVEL, Math.floor(value)));
+}
+
+/** 给调试台加遗物时补上等级和收藏记录，避免装配室 / 奖励池读到空等级。 */
+function ensureDebugRelic(id) {
+  G.p.relicLevels[id] = debugRelicLevel(id);
+  if (!G.p.relicCollection.includes(id)) G.p.relicCollection.push(id);
+}
+
+/** 调等级：只改 G.p.relicLevels，不动槽位，所以和拖拽装备互不冲突。 */
+function adjustDebugLevel(id, delta) {
+  ensureDebugRelic(id);
+  const next = Math.max(
+    1,
+    Math.min(DEBUG_MAX_LEVEL, debugRelicLevel(id) + delta)
+  );
+  G.p.relicLevels[id] = next;
+  renderDebugAll();
+}
+
+/**
+ * 生成一个可拖拽的遗物条目：名字 + 实时等级 + 右侧两个极小加减按钮。
+ * slotIndex 有值时表示它正放在某个普通槽里。
+ */
+function makeDebugItem(id, slotIndex) {
+  const item = document.createElement('div');
+  item.className = 'dbg-item';
+  item.draggable = true;
+  item.dataset.debugRelic = id;
+  if (slotIndex !== undefined) item.dataset.slot = String(slotIndex);
+
+  const name = document.createElement('span');
+  name.className = 'dbg-name';
+  name.textContent = `${DEBUG_RELIC_NAMES[id] || id} (Lv.${debugRelicLevel(id)})`;
+
+  const steppers = document.createElement('span');
+  steppers.className = 'dbg-steppers';
+
+  for (const [text, step] of [['+', 1], ['-', -1]]) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dbg-step';
+    btn.draggable = false;
+    btn.dataset.levelStep = String(step);
+    btn.textContent = text;
+    btn.title = step > 0 ? '提升 1 级' : '降低 1 级';
+    btn.setAttribute(
+      'aria-label',
+      `${step > 0 ? '提升' : '降低'}${DEBUG_RELIC_NAMES[id] || id}等级`
+    );
+    steppers.appendChild(btn);
+  }
+
+  item.append(name, steppers);
+  return item;
+}
+
+/** 把遗物放进指定普通槽；槽里原有的遗物先挪到别的空槽，避免直接消失。 */
+function placeDebugRelic(id, targetSlot) {
+  const slots = G.p.relicSlots;
+  const from = slots.indexOf(id);
+
+  // 同一件遗物已经在别的普通槽里：直接交换两格，避免重复装备
+  if (from >= 0 && from < 3 && from !== targetSlot) {
+    slots[from] = slots[targetSlot];
+  } else if (slots[targetSlot] && slots[targetSlot] !== id) {
+    const empty = [0, 1, 2].find((i) => i !== targetSlot && !slots[i]);
+    if (empty !== undefined) slots[empty] = slots[targetSlot];
+  }
+
+  slots[targetSlot] = id;
+  ensureDebugRelic(id);
+}
+
+/** 点击备选库：放进第一个空槽；没有空槽就替换槽 1。 */
+function equipDebugRelic(id) {
+  const slots = G.p.relicSlots;
+  if (slots.indexOf(id) >= 0 && slots.indexOf(id) < 3) return;
+
+  let target = [0, 1, 2].find((i) => !slots[i]);
+  if (target === undefined) target = 0;
+  placeDebugRelic(id, target);
+  renderDebugAll();
+}
+
+/** 特殊遗物固定进 3 号槽。 */
+function equipDebugSpecial(id) {
+  G.p.relicSlots[3] = id;
+  ensureDebugRelic(id);
+  renderDebugAll();
+}
+
+/** 拖拽数据同时存内存和 dataTransfer，兼容不同浏览器。 */
+function readDebugPayload(e) {
+  if (debugDragPayload) return debugDragPayload;
+  try {
+    const raw = e.dataTransfer.getData('text/plain');
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 从备选库或槽位开始拖拽；只允许拖整条遗物，不允许从 +/- 按钮上拖。 */
+function beginDebugDrag(e, source) {
+  const item = e.target.closest('.dbg-item');
+  if (!item) return;
+
+  // 如果点的是加减号按钮，直接退出，不触发拖拽
+  if (e.target.closest('.dbg-step')) return;
+
+  const id = item.dataset.debugRelic;
+  const payload = { source, id };
+  if (source === 'slot') payload.slot = Number(item.dataset.slot);
+
+  debugDragPayload = payload;
+
+  // 关键：使用 'all' 允许一切操作，避免和 dropEffect 冲突
+  e.dataTransfer.effectAllowed = 'all';
+  e.dataTransfer.setData('text/plain', JSON.stringify(payload));
+  item.classList.add('dragging');
+}
+
+/** 拖拽结束：清掉高亮和缓存，下一次拖拽不会读到旧数据。 */
+function finishDebugDrag(e) {
+  const item = e.target.closest('.dbg-item');
+  if (item) item.classList.remove('dragging');
+  debugDragPayload = null;
+}
+
+/** 判断点击的是不是 +/- 按钮；是就只调等级，不触发装备。 */
+function handleDebugItemClick(e, source) {
+  const stepBtn = e.target.closest('[data-level-step]');
+  if (stepBtn) {
+    const item = stepBtn.closest('.dbg-item');
+    if (item) {
+      adjustDebugLevel(item.dataset.debugRelic, Number(stepBtn.dataset.levelStep));
+    }
+    return;
+  }
+
+  const item = e.target.closest('.dbg-item');
+  if (!item) return;
+  if (source === 'library') equipDebugRelic(item.dataset.debugRelic);
+  if (source === 'special') equipDebugSpecial(item.dataset.debugRelic);
+}
+
+/** 重新画 3 个普通槽位；拖拽放入、互换和调等级后都会刷新。 */
+function renderDebugSlots() {
+  debugSlotsEl.textContent = '';
+
+  for (let i = 0; i < 3; i++) {
+    const slot = document.createElement('div');
+    slot.className = 'debug-slot';
+    slot.dataset.slot = String(i);
+
+    const head = document.createElement('div');
+    head.className = 'debug-slot-head';
+    head.textContent = `槽 ${i + 1} · 第 ${i + 1} 发`;
+    slot.appendChild(head);
+
+    const id = G.p.relicSlots[i];
+    slot.classList.toggle('empty', !id);
+    if (!id) {
+      const empty = document.createElement('div');
+      empty.className = 'debug-empty';
+      empty.textContent = '拖到这里';
+      slot.appendChild(empty);
+    } else {
+      slot.appendChild(makeDebugItem(id, i));
+    }
+
+    slot.addEventListener('dragover', (e) => {
+      e.preventDefault(); // 必须保留，表示允许放下
+      // 不设置 dropEffect，让浏览器根据 effectAllowed 自动匹配
+      slot.classList.add('over');
+    });
+    slot.addEventListener('dragleave', (e) => {
+      // 只有真正离开整个槽位才取消高亮，经过子元素时不闪
+      if (!slot.contains(e.relatedTarget)) slot.classList.remove('over');
+    });
+    slot.addEventListener('drop', (e) => {
+      e.preventDefault();
+      slot.classList.remove('over');
+
+      const payload = readDebugPayload(e);
+      debugDragPayload = null;
+      if (!payload) return;
+
+      if (payload.source === 'library') {
+        // 从备选库拖进来：占住这个槽，原有遗物尽量挪到空槽
+        placeDebugRelic(payload.id, i);
+      } else if (payload.source === 'slot') {
+        // 槽位之间拖拽：直接交换两格的内容，顺序立即写回 G.p.relicSlots
+        const from = payload.slot;
+        if (from === i || from < 0 || from > 2) return;
+        if (G.p.relicSlots[from] !== payload.id) return;
+        const slots = G.p.relicSlots;
+        const tmp = slots[i];
+        slots[i] = slots[from];
+        slots[from] = tmp;
+      }
+
+      renderDebugAll();
+    });
+
+    debugSlotsEl.appendChild(slot);
+  }
+}
+
+/** 重画备选库；名称右侧实时显示等级和 +/-。 */
+function renderDebugLibrary() {
+  debugLibrary.textContent = '';
+  for (const id of DEBUG_ORDINARY_RELICS) {
+    debugLibrary.appendChild(makeDebugItem(id));
+  }
+}
+
+/** 重画特殊遗物列。 */
+function renderDebugSpecials() {
+  debugSpecials.textContent = '';
+  for (const id of DEBUG_SPECIAL_RELICS) {
+    debugSpecials.appendChild(makeDebugItem(id));
+  }
+}
+
+/** 三块一起刷新，等级改动后名字和槽位都保持同步。 */
+function renderDebugAll() {
+  renderDebugLibrary();
+  renderDebugSpecials();
+  renderDebugSlots();
+}
+
+/** 刷新沙盒按钮：开启后文字变成“沙盒运行中”，并保持绿色高亮。 */
+function syncDebugSandbox() {
+  debugSandbox.textContent = G.isSandbox ? '沙盒运行中' : '开启沙盒';
+  debugSandbox.classList.toggle('on', G.isSandbox);
+  debugSandbox.setAttribute('aria-pressed', G.isSandbox ? 'true' : 'false');
+}
+
+/** 沙盒刷怪：在屏幕四边随机生成固定配方的 20 只混合怪，受同屏硬上限保护。 */
+function spawnDebugWave() {
+  for (let i = 0; i < DEBUG_SANDBOX_MIX.length; i++) {
+    if (G.enemies.length >= LIMITS.enemies) break;
+    spawnEnemy(DEBUG_SANDBOX_MIX[i]);
+  }
+}
+
+/** 沙盒清怪：怪、敌弹、首领危险区和残影一起清掉，方便下一轮重新摆场。 */
+function clearDebugEnemies() {
+  G.enemies.length = 0;
+  G.hostile.length = 0;
+  G.bossHazards.length = 0;
+  G.bossGhosts.length = 0;
+  G.p.attackTarget = null;
+  G.shake = 0;
+}
+
+/** 打开 / 关闭调试台。打开时若正在战斗就自动暂停，关闭时恢复。 */
+function toggleDebugPanel(force) {
+  const isHidden = debugPanel.classList.contains('hidden');
+  const shouldShow = typeof force === 'boolean' ? force : isHidden;
+  if (shouldShow === !isHidden) return;
+
+  if (shouldShow) {
+    debugPanelOpen = true;
+    debugPanel.classList.remove('hidden');
+    // 调试面板是最高层；暂停遮罩只保留状态，不再画出来挡面板。
+    pauseMenu.classList.add('debug-suspended');
+    G.mouseDown = false;
+    clearInput();
+
+    renderDebugAll();
+    syncDebugSandbox();
+  } else {
+    debugPanel.classList.add('hidden');
+    debugPanelOpen = false;
+    pauseMenu.classList.remove('debug-suspended');
+    debugDragPayload = null;
+  }
+}
+
+// 备选库：拖拽装备；点击条目装备；点 +/- 只调等级。
+debugLibrary.addEventListener('click', (e) => handleDebugItemClick(e, 'library'));
+debugLibrary.addEventListener('dragstart', (e) => beginDebugDrag(e, 'library'));
+debugLibrary.addEventListener('dragend', finishDebugDrag);
+
+// 槽位内部：拖拽互换；点 +/- 调等级。
+debugSlotsEl.addEventListener('click', (e) => handleDebugItemClick(e, 'slot'));
+debugSlotsEl.addEventListener('dragstart', (e) => beginDebugDrag(e, 'slot'));
+debugSlotsEl.addEventListener('dragend', finishDebugDrag);
+
+// 特殊遗物：点击装备到 3 号槽；+/- 调等级。
+debugSpecials.addEventListener('click', (e) => handleDebugItemClick(e, 'special'));
+debugSpecials.addEventListener('dragend', finishDebugDrag);
+
+// 清空遗物：槽位、等级、收藏和副元素一起归零，方便从空构筑重新测。
+debugClear.addEventListener('click', () => {
+  G.p.relicSlots.fill(null);
+  G.p.relicLevels = {};
+  G.p.relicCollection.length = 0;
+  G.p.enchantState.secondaryId = null;
+  G.p.enchantState.secondaryUnlocked = false;
+  G.p.enchantState.secondaryUnlockSource = null;
+  G.p.attackTarget = null;
+  debugDragPayload = null;
+  renderDebugAll();
+});
+
+// 沙盒开关：只改一个布尔值，真正的拦截在 finishRoom 和 hurtPlayer 里。
+debugSandbox.addEventListener('click', () => {
+  G.isSandbox = !G.isSandbox;
+  syncDebugSandbox();
+});
+
+// 刷一波混合怪：只在战斗/暂停时生效，生成位置由 spawnEnemy 自己选屏幕边缘。
+debugSpawn.addEventListener('click', () => {
+  if (G.state !== 'play' && G.state !== 'paused') return;
+  spawnDebugWave();
+});
+
+// 清怪：同时清掉敌弹和首领危险区，避免清完还被残留弹幕打到。
+debugClearEnemies.addEventListener('click', clearDebugEnemies);
+
+// 页面启动时先把隐藏面板的内容画好；F2 打开时直接显示。
+renderDebugAll();
+syncDebugSandbox();
 
 // ---- 5. 奖励面板接线 ----
 // systems.js 是纯逻辑不能碰 DOM：把"显示面板"这个函数注进去，
@@ -252,6 +634,13 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
+  // F2：法术调试台。打开时自动暂停，关闭时如果原本是调试台暂停的，就恢复游戏。
+  if (e.code === 'F2' && !e.repeat) {
+    e.preventDefault();
+    toggleDebugPanel();
+    return;
+  }
+
   // F：切换全屏（和 Canvas 上的全屏按钮一样）；按住不放只处理第一次
   if (e.code === 'KeyF' && !e.repeat) {
     toggleFullscreen();
@@ -261,6 +650,12 @@ window.addEventListener('keydown', (e) => {
   // Esc：在全屏里先退出全屏，由 fullscreenchange 补暂停；
   // 不在全屏时直接切换暂停（按住不放只处理第一次）。
   if (e.code === 'Escape' && !e.repeat) {
+    // 调试台打开时 Esc 只负责退出全屏，不在这里把游戏放回运行（面板还开着）
+    if (debugPanelOpen) {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      return;
+    }
+
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => {
         // 极少数浏览器取消失败时没有 fullscreenchange，兜底暂停一次
