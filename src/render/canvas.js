@@ -19,7 +19,7 @@ import {
 } from './entity.js';
 import { drawBossHazards, drawBossGhosts } from './boss_fx.js';
 import { drawBursts, drawZones, drawLightningArcs, drawCombatTexts } from './fx.js';
-import { drawHud, drawBossBar, drawNotice, drawDeadOverlay, HUD_BUTTONS } from './hud.js';
+import { drawHud, drawBossBar, drawNotice, drawDeadOverlay, drawVictoryOverlay, HUD_BUTTONS } from './hud.js';
 
 export { HUD_BUTTONS };
 
@@ -85,5 +85,7 @@ export function draw() {
 
   if (G.state === 'dead') {
     drawDeadOverlay();
+  } else if (G.state === 'victory') {
+    drawVictoryOverlay();
   }
 }

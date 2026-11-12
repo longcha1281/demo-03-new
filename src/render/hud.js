@@ -15,8 +15,10 @@ import {
   WEAPON,
   LIGHTNING_FX,
   PICKUP,
+  CAMPAIGN,
 } from '../config.js';
 import { G } from '../core/state.js';
+import { campaignRound, isR7Wave, tierForRoom } from '../core/boss.js';
 import { getCtx } from './context.js';
 
 
@@ -46,6 +48,9 @@ const HUD_STYLE = {
   cut: 8,
   lineWidth: 1,
 };
+
+// 第 2 轮首领词缀的短标签，显示在血条名称右侧
+const AFFIX_LABEL = { shield: '护盾', rage: '暴怒', teleport: '瞬移' };
 
 // 右上角两个 Canvas 按钮的点击范围（逻辑坐标）。
 // main.js 用同一份数据做命中判定，避免画的位置和点的位置对不上。
@@ -164,12 +169,17 @@ export function drawHud() {
   // 2. 右上：单行纯文字数据，不要面板
   // ======================================
 
+  const roomLabel = G.endless
+    ? (isR7Wave(G.wave)
+      ? '房 ' + String(G.wave).padStart(2, '0') +
+        ' · 绝对死亡 · 存活 ' + Math.floor(G.r7Time) + ' 秒'
+      : '房 ' + String(G.wave).padStart(2, '0') +
+        ' · 轮 ' + tierForRoom(G.wave, G.bossEncounter))
+    : '房 ' + String(G.wave).padStart(2, '0') + '/' + CAMPAIGN.TOTAL_ROOMS +
+      ' · 轮 ' + campaignRound(G.wave);
+
   const stats = [
-    { text: '房 ', color: HUD_STYLE.secondary },
-    {
-      text: String(G.wave).padStart(2, '0'),
-      color: '#8ff8ff'
-    },
+    { text: roomLabel, color: '#8ff8ff' },
     {
       text: ' | ',
       color: 'rgba(111,135,148,0.55)'
@@ -635,16 +645,26 @@ export function drawHudPanel(x, y, w, h, isBoss = false) {
 
 export function drawBossBar() {
   const ctx = getCtx();
-  const boss = G.enemies.find(
-    e => e.type === 'boss'
+  const bosses = G.enemies.filter(
+    e => e.type === 'boss' && e.hp > 0 && !e.dead
   );
 
-  if (!boss) return;
+  if (bosses.length === 0) return;
 
-  const x = 340;
-  const y = 8;
-  const w = 280;
-  const h = 40;
+  // 单 Boss 保持原位置；双 Boss 上下两条，各自带形态/词缀/终极标签。
+  if (bosses.length === 1) {
+    drawOneBossBar(ctx, bosses[0], 340, 8, 280, 40);
+    return;
+  }
+  // 双血条下移，避开右上角房间/存活数据行。
+  drawOneBossBar(ctx, bosses[0], 340, 52, 280, 36);
+  drawOneBossBar(ctx, bosses[1], 340, 94, 280, 36);
+}
+
+/** 画一条 Boss 血条；双 Boss 时用更矮的面板上下排列。 */
+function drawOneBossBar(ctx, boss, x, y, w, h) {
+  const big = h >= 40;
+  const nameY = y + (big ? 15 : 12);
 
   drawHudPanel(x, y, w, h, true);
 
@@ -662,15 +682,34 @@ export function drawBossBar() {
   ctx.fillText(
     String(boss.archetype || ''),
     x + 10,
-    y + 15,
+    nameY,
     w - 20
   );
 
+  // 词缀和终极可能同时存在（R4/R6/R7），两个标签都要给玩家看。
+  const tags = [];
+  if (boss.affix) {
+    tags.push(`词缀 · ${AFFIX_LABEL[boss.affix] || boss.affix}`);
+  }
+  if (boss.ultimate !== null && boss.ultimate !== undefined) {
+    tags.push(`终极 · ${String(boss.archetype || '')}`);
+  }
+  const tag = tags.join(' · ');
+  if (tag) {
+    ctx.textAlign = 'right';
+    ctx.font = '10px "Consolas", "Courier New", monospace';
+    ctx.fillStyle = boss.affix === 'shield' ? COLORS.ice
+      : boss.affix === 'rage' ? COLORS.fire
+      : boss.affix === 'teleport' ? '#c39bff'
+      : HUD_STYLE.accent;
+    ctx.fillText(tag, x + w - 10, nameY);
+  }
+
   // 12 格紫灰色分段血条
   const barX = x + 10;
-  const barY = y + 26;
+  const barY = y + (big ? 26 : 23);
   const barW = w - 20;
-  const barH = 6;
+  const barH = big ? 6 : 5;
 
   const ratio = Math.max(
     0,
@@ -680,7 +719,8 @@ export function drawBossBar() {
     )
   );
 
-  const count = 12;
+  // 血条分段：每只 Boss 可以配置段数（熔核巨像用 20 段表现“装甲很厚”）
+  const count = Math.max(1, boss.segments || 12);
   const gap = 1.5;
 
   const segW =
@@ -762,4 +802,45 @@ export function drawDeadOverlay() {
   ctx.fillStyle = COLORS.textDim;
   ctx.font = '11px "Courier New", monospace';
   ctx.fillText(`本局分数 ${G.score}`, CANVAS.WIDTH / 2, CANVAS.HEIGHT / 2 + 36);
+}
+
+/** 胜利遮罩：黑幕 + 战役完成 + 分数/最高分/击败数 + 再战/无尽提示。 */
+export function drawVictoryOverlay() {
+  const ctx = getCtx();
+  const cx = CANVAS.WIDTH / 2;
+  const cy = CANVAS.HEIGHT / 2;
+
+  // 黑幕：盖住战场，但保留一点背景层次
+  ctx.fillStyle = 'rgba(4, 6, 11, 0.80)';
+  ctx.fillRect(0, 0, CANVAS.WIDTH, CANVAS.HEIGHT);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // 主标题
+  ctx.fillStyle = HUD_STYLE.accent;
+  ctx.font = 'bold 30px "Courier New", monospace';
+  ctx.fillText('战役完成', cx, cy - 62);
+
+  // 本局分数与最高分
+  ctx.fillStyle = COLORS.text;
+  ctx.font = '14px "Courier New", monospace';
+  ctx.fillText(`本局分数 ${G.score}`, cx, cy - 16);
+
+  ctx.font = '12px "Courier New", monospace';
+  ctx.fillText(`最高分 ${G.bestScore}`, cx, cy + 8);
+
+  // 房数与首领击败数
+  ctx.fillStyle = COLORS.textDim;
+  ctx.font = '11px "Courier New", monospace';
+  ctx.fillText(
+    `房数 ${CAMPAIGN.TOTAL_ROOMS} · 击败首领 ${G.bossesCleared}`,
+    cx,
+    cy + 30
+  );
+
+  // 操作提示
+  ctx.fillStyle = COLORS.text;
+  ctx.font = '12px "Courier New", monospace';
+  ctx.fillText('R 再战 / E 无尽', cx, cy + 58);
 }

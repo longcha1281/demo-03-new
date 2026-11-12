@@ -22,7 +22,7 @@ import { getCtx } from './context.js';
 import { drawBoss } from './boss_fx.js';
 
 /**
- * 血包：绿色菱形外框 + 十字，随时间轻微呼吸；快消失时整体变淡。
+ * 血包：绿色菱形外框 + 十字，随时间轻微呼吸（常驻，不消失）。
  * 真正的回血在 systems.js 的 updatePickups 里。
  */
 export function drawPickups() {
@@ -30,11 +30,9 @@ export function drawPickups() {
   const color = '#5ef2a0';
   for (const q of G.pickups) {
     const pulse = 0.9 + 0.1 * Math.sin(G.time * 6 + q.x);
-    const fade = Math.min(1, q.life / 1.2);
     const r = 7 * pulse;
     ctx.save();
     ctx.translate(q.x, q.y);
-    ctx.globalAlpha = fade;
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     ctx.shadowColor = color;
@@ -79,17 +77,59 @@ export function drawSparks() {
   ctx.globalAlpha = 1;
 }
 
-/** 子弹：发光小方块，6×6 居中；颜色跟着当前星核走。 */
+/** 子弹：普通弹是发光小方块；闪电形态改画随速度方向抖动的电弧。 */
 export function drawShots() {
   const ctx = getCtx();
   ctx.save();
   ctx.shadowBlur = 10; // 发光的关键：模糊半径
   for (const s of G.shots) {
     const color = s.color || COLORS.shot;
-    ctx.shadowColor = color;
-    ctx.fillStyle = color;
-    // 以 (s.x, s.y) 为中心画 6×6 方块
-    ctx.fillRect(s.x - 3, s.y - 3, 6, 6);
+    const lightning =
+      s.isLightning || (s.tags && s.tags.includes('lightning'));
+
+    if (!lightning) {
+      // 普通弹：以 (s.x, s.y) 为中心画 6×6 方块
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = color;
+      ctx.fillStyle = color;
+      ctx.fillRect(s.x - 3, s.y - 3, 6, 6);
+      continue;
+    }
+
+    // 闪电弹：沿飞行方向铺 4 段折线，每一帧随机抖动，看起来像持续放电
+    const angle = Math.atan2(s.vy || 0, s.vx || 0);
+    const dirX = Math.cos(angle);
+    const dirY = Math.sin(angle);
+    const normalX = -dirY;
+    const normalY = dirX;
+    const length = 14;
+    const segments = 4;
+
+    ctx.beginPath();
+    for (let i = 0; i <= segments; i++) {
+      // 从弹丸后方 7px 画到前方 7px
+      const along = (i / segments - 0.5) * length;
+      // 首尾点不抖，避免电弧离开弹丸中心；中间点左右抖 ±2.5px
+      const jitter =
+        i === 0 || i === segments ? 0 : (Math.random() * 2 - 1) * 2.5;
+      const px = s.x + dirX * along + normalX * jitter;
+      const py = s.y + dirY * along + normalY * jitter;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.shadowColor = '#00ffff';
+    ctx.shadowBlur = 15;
+
+    // 先画一层青色宽光，再叠亮白细线，保证在深色背景上也够刺眼
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    ctx.strokeStyle = '#eaffff';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
   }
   ctx.restore();
 }
@@ -97,15 +137,53 @@ export function drawShots() {
 /**
  * 敌方子弹：红点 + 发光；追踪弹外面再加一圈淡环。
  */
+/**
+ * 敌方子弹按元素标记取色：冰蓝 / 虚空紫 / 终焉金，未标记的沿用统一亮红。
+ * @param {object} h 敌弹
+ * @returns {string} 绘制颜色
+ */
+export function hostileShotColor(h) {
+  if (h.element === 'frost') return '#69d7ff';
+  if (h.element === 'void') return '#b06cff';
+  if (h.element === 'final') return '#ffd166';
+  return COLORS.hostile;
+}
+
 export function drawHostile() {
   const ctx = getCtx();
   ctx.save();
   ctx.shadowBlur = 10;
 
   for (const h of G.hostile) {
-    // 所有敌弹统一用亮红，Boss 和暗蚀弹幕不再互相混淆
-    const color = COLORS.hostile;
+    // 按元素标记分色；没标记的继续用统一亮红
+    const color = hostileShotColor(h);
     const radius = h.r || 3;
+
+    // 仅高速虚空弹绘制短拖尾；沿真实历史路径截到 26px，不伸向未经过的位置。
+    if (h.voidOrb && h.trail) {
+      ctx.save();
+      let x = h.x, y = h.y, remaining = 26;
+      for (const point of h.trail) {
+        const length = Math.hypot(point.x - x, point.y - y);
+        if (length === 0) continue;
+        const drawn = Math.min(length, remaining);
+        const nextX = x + (point.x - x) * drawn / length;
+        const nextY = y + (point.y - y) * drawn / length;
+        const fade = remaining / 26;
+        ctx.globalAlpha = 0.4 * fade;
+        ctx.strokeStyle = color;
+        ctx.shadowColor = color;
+        ctx.lineWidth = 3 * fade;
+        ctx.beginPath();ctx.moveTo(x, y);ctx.lineTo(nextX, nextY);ctx.stroke();
+        ctx.globalAlpha = 0.65 * fade;
+        ctx.strokeStyle = '#ffd5dd';ctx.lineWidth = fade;
+        ctx.stroke();
+        remaining -= drawn;
+        if (remaining <= 0) break;
+        x = nextX; y = nextY;
+      }
+      ctx.restore();
+    }
 
     ctx.shadowColor = color;
     ctx.fillStyle = color;
@@ -334,20 +412,23 @@ export function drawBomber(e) {
   ctx.restore();
 }
 
-/** 分裂体：两个绿色圆交叠，死亡后裂成两只小追猎。 */
+/** 分裂体：两个红色圆交叠，死亡后裂成两只小追猎。 */
 export function drawSplitter(e) {
   const ctx = getCtx();
+  const color = ENEMY.TYPES.splitter.color || '#ff4d6d';
   ctx.save();
-  ctx.strokeStyle = '#5ef2a0';
-  ctx.fillStyle = 'rgba(94, 242, 160, 0.18)';
-  ctx.shadowColor = '#5ef2a0';
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
   ctx.shadowBlur = 12;
   ctx.lineWidth = 1.5;
 
   for (const sx of [-1, 1]) {
     ctx.beginPath();
     ctx.arc(e.x + sx * e.r * 0.42, e.y, e.r * 0.72, 0, Math.PI * 2);
+    ctx.globalAlpha = 0.18;
     ctx.fill();
+    ctx.globalAlpha = 1;
     ctx.stroke();
   }
   ctx.restore();
@@ -411,8 +492,8 @@ export function elementColor(id) {
   return core ? core.color : '#ffffff';
 }
 
-/** 画一圈元素状态光晕。 */
-export function drawStatusRing(e, color, radius, width, alpha) {
+/** 画一圈元素状态光晕；dash 有值时画虚线圈（用于副元素外环）。 */
+export function drawStatusRing(e, color, radius, width, alpha, dash) {
   const ctx = getCtx();
   ctx.save();
   ctx.globalAlpha = alpha;
@@ -420,30 +501,16 @@ export function drawStatusRing(e, color, radius, width, alpha) {
   ctx.shadowColor = color;
   ctx.shadowBlur = 12;
   ctx.lineWidth = width;
+  if (dash) ctx.setLineDash(dash);
   ctx.beginPath();
   ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 }
 
-/** 画半圈元素状态光晕（左右各半，拼成双色环）。 */
-export function drawStatusHalf(e, color, radius, width, alpha, start, end) {
-  const ctx = getCtx();
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.strokeStyle = color;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 12;
-  ctx.lineWidth = width;
-  ctx.beginPath();
-  ctx.arc(e.x, e.y, radius, start, end);
-  ctx.stroke();
-  ctx.restore();
-}
-
 /**
- * 元素状态外圈：单元素时画一圈；主、副两种 Debuff 同时存在时画左右双色半环
- * （左主右副），让玩家一眼看出两种状态都在生效。
+ * 元素状态外圈：单元素时画一圈实线；主、副两种 Debuff 同时存在时画同心双环
+ * （内圈主元素实线，外圈副元素虚线），让玩家一眼看出两种状态都在生效。
  */
 export function drawEnemyStatus(e) {
   const p = G.p;
@@ -459,18 +526,26 @@ export function drawEnemyStatus(e) {
       : false;
 
   if (hasPrimary && hasSecondary) {
-    // 左半圈主元素、右半圈副元素：一眼看出两种 Debuff 同时挂着
-    drawStatusHalf(e, elementColor(primaryId), e.r + 4, 2, 0.85,
-      Math.PI / 2, Math.PI * 1.5);
-    drawStatusHalf(e, elementColor(secondaryId), e.r + 4, 2, 0.85,
-      -Math.PI / 2, Math.PI / 2);
+    // 内圈主元素：粗实线，贴近怪物；外圈副元素：细实线，稍微远一点
+    drawStatusRing(e, elementColor(primaryId), e.r + 3, 2, 0.85);
+    drawStatusRing(e, elementColor(secondaryId), e.r + 6, 1, 0.9);
     return;
   }
 
-  // 只有一种状态：沿用原来的优先级着色（冻结优先等）
+  // 只有一种附魔 Debuff：只画该元素的一圈实线
+  if (hasPrimary) {
+    drawStatusRing(e, elementColor(primaryId), e.r + 3, 2, 0.8);
+    return;
+  }
+  if (hasSecondary) {
+    drawStatusRing(e, elementColor(secondaryId), e.r + 3, 2, 0.8);
+    return;
+  }
+
+  // 没有附魔但可能被冻结 / 感电：沿用原来的优先级着色
   const color = enemyStatusColor(e);
   if (!color) return;
-  drawStatusRing(e, color, e.r + 4, 2, 0.8);
+  drawStatusRing(e, color, e.r + 3, 2, 0.8);
 }
 
 /** 玩家：会呼吸、会转动的霓虹圆。所有尺寸都跟着 p.r 缩放。 */

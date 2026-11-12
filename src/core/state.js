@@ -33,6 +33,7 @@ export function createPlayer() {
     dashRate: PLAYER.dashRate,         // 冲刺冷却上限
 
     /* --- 无敌时间 --- */
+    frostSlowTime: 0,                  // 冰弹命中后的短时减速
     inv: 0,                            // 受击/冲刺后的无敌剩余秒数
     hurtFlash: 0,                      // 受击红晕剩余时间（只受击，不跟冲刺共用）
 
@@ -115,9 +116,19 @@ export const G = {
   normalRoomsCleared: 0,               // 累计清掉的普通房
   bossesCleared: 0,                    // 累计击败的首领
   bossCountdownRemaining: 0,           // 首领入场倒计时（首领房开局设 3）
+  bossEncounter: 0,                    // 第几场 Boss：进无尽设 15，每进 Boss 房 +1
+  bossPairSize: 1,                     // 本场应生成几只 Boss（1 单 / 2 双）
+  bossSpawnCountThisRoom: 0,           // 本场已生成几只 Boss
+  pendingBossSpawn: null,              // 双 Boss 第二只的延迟入场信息
+  r7State: 'idle',                     // R7 状态：idle / fighting / respawning
+  r7RespawnTimer: 0,                   // R7 下一对入场倒计时
+  r7Time: 0,                           // R7 已存活秒数（同时用于计分）
 
   mode: 'campaign',                    // 固定战役模式（"无尽"就是默认玩法）
   route: 'normal',                     // 当前房间路线 normal / boss
+  endless: false,                      // 通关后进入无尽：从第 46 房继续现有循环
+  cleared: false,                      // 本局是否已通关正式战役
+  bestScore: 0,                        // 最高分（来自 localStorage 纪录）
 
   /* --- 攻击模式与连锁冷却（第十一阶段） --- */
   autoAttack: true,                    // 自动攻击开关（右上角按钮切换）

@@ -27,6 +27,8 @@ import {
   LIGHTNING_FX,
   FISSION_FX,
   PICKUP,
+  CAMPAIGN,
+  ADVANCED,
 } from '../config.js';
 import { G, createPlayer } from './state.js';
 import {
@@ -46,6 +48,8 @@ import {
   updateBossCountdown,
   updateBossHazards,
   updateBossGhosts,
+  isBossRoomWave,
+  isR7Wave,
 } from './boss.js';
 import {
   updateAttack,
@@ -96,6 +100,81 @@ export function setSecondaryHook(fn) {
   secondaryHook = fn;
 }
 
+/** 是否已经打到正式战役最后一房（无尽模式除外）。 */
+function campaignComplete() {
+  return !G.endless && G.wave >= CAMPAIGN.TOTAL_ROOMS;
+}
+
+/**
+ * 读取最高分记录。Node 测试环境没有 localStorage，或数据损坏时返回空记录。
+ * @returns {{score:number, rooms:number, bosses:number, cleared:boolean}}
+ */
+export function readCampaignBest() {
+  const empty = { score: 0, rooms: 0, bosses: 0, cleared: false };
+  if (typeof localStorage === 'undefined') return empty;
+
+  try {
+    const raw = localStorage.getItem(CAMPAIGN.BEST_KEY);
+    if (!raw) return empty;
+    const data = JSON.parse(raw);
+    return {
+      score: Math.max(0, Number(data.score) || 0),
+      rooms: Math.max(0, Number(data.rooms) || 0),
+      bosses: Math.max(0, Number(data.bosses) || 0),
+      cleared: !!data.cleared,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * 更新最高分：只有本局分数更高才覆盖 localStorage。
+ * 死亡和胜利各调用一次；存储不可用时只保留本局内存纪录。
+ * @param {boolean} cleared 本局是否通关
+ * @returns {{score:number, rooms:number, bosses:number, cleared:boolean}} 当前最高纪录
+ */
+export function updateCampaignBest(cleared) {
+  const prev = readCampaignBest();
+  const current = {
+    score: Math.max(0, Math.floor(G.score || 0)),
+    rooms: Math.max(1, Math.floor(G.wave || 1)),
+    bosses: Math.max(0, Math.floor(G.bossesCleared || 0)),
+    cleared: !!cleared,
+  };
+  if (current.score <= prev.score) return prev;
+
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(CAMPAIGN.BEST_KEY, JSON.stringify(current));
+    } catch {
+      // 隐私模式 / 配额不足：忽略写入失败，不打断游戏
+    }
+  }
+  return current;
+}
+
+/** 正式战役通关：记录最高分，切到胜利结算（不再进入第 46 房）。 */
+export function enterVictory() {
+  if (G.endless) return;
+  const best = updateCampaignBest(true);
+  G.cleared = true;
+  G.bestScore = Math.max(G.bestScore, best.score);
+  G.state = 'victory';
+}
+
+/** 胜利界面按 E：从第 46 房继续，Boss 场次从第 15 场之后接上。 */
+export function enterEndless() {
+  if (G.state !== 'victory') return;
+  G.endless = true;
+  G.state = 'play';
+  G.bossEncounter = ADVANCED.START_ENCOUNTER;
+  G.r7State = 'idle';
+  G.r7RespawnTimer = 0;
+  G.r7Time = 0;
+  beginRoom(CAMPAIGN.TOTAL_ROOMS + 1);
+}
+
 /** 找该类遗物的第一个空槽：普通 0–2，特殊只有 3。没有空槽返回 -1。 */
 export function freeSlotFor(kind) {
   const p = G.p;
@@ -119,6 +198,11 @@ export function acquireRelic(id) {
   // 已有同 id：只升级，不重复进收藏 / 不重复装备
   if (p.relicLevels[id]) {
     const max = RELIC_MAX[def.kind];
+    // 嗜血升级：先把击杀数夹到旧等级上限，避免带着超额层数直接跳级
+    if (id === 'bloodthirst') {
+      const oldCap = WEAPON.BLOODTHIRST.KILL_CAP[p.relicLevels[id] - 1];
+      p.bloodthirstKills = Math.min(p.bloodthirstKills, oldCap);
+    }
     p.relicLevels[id] = Math.min(max, p.relicLevels[id] + 1);
     return;
   }
@@ -160,6 +244,12 @@ export function selectSecondary(id) {
   p.enchantState.secondaryUnlocked = true;
   p.enchantState.secondaryUnlockSource = 'elementMix';
   G.pendingSecondarySelection = false;
+
+  // 第 45 房首领奖励附带副元素选择时，选完直接通关，不再进装配室
+  if (campaignComplete()) {
+    enterVictory();
+    return true;
+  }
 
   // 副元素选完，奖励流程继续：进入装配室，等玩家点「继续深入」
   G.state = 'route';
@@ -213,10 +303,17 @@ export function moveRelic(id, slotIndex) {
 
 /**
  * 装配室点「继续深入」：房号 +1、开始下一房、回到战斗。
+ * 正式战役第 45 房后必须拦截，绝不进入第 46 房。
  */
 export function confirmRoute() {
   // 只有停在装配室时才推进；重复点按钮 / 误调用不会多加房
   if (G.state !== 'route') return;
+
+  if (campaignComplete()) {
+    enterVictory();
+    return;
+  }
+
   G.wave++;
   beginRoom(G.wave);
   G.state = 'play';
@@ -271,9 +368,14 @@ export function setKey(code, down) {
       break;
   }
 
-  // R 键只在死亡界面有效：按下瞬间重开一局
-  if (code === 'KeyR' && down && G.state === 'dead') {
+  // R 键在死亡 / 胜利界面有效：按下瞬间重开一局
+  if (code === 'KeyR' && down && (G.state === 'dead' || G.state === 'victory')) {
     restartRun();
+  }
+
+  // E 键只在胜利界面有效：进入无尽，从第 46 房继续
+  if (code === 'KeyE' && down && G.state === 'victory') {
+    enterEndless();
   }
 }
 
@@ -422,7 +524,9 @@ export function beginRoom(wave) {
   G.p.attackTarget = null;
   G.lightningCD = 0; // 闪电链接的冷却跨房清零，避免开局第一发打不出链
 
-  const plan = buildRoomPlan(wave);
+  // R7 绝对死亡：不生成普通怪，也不刷精英。
+  const r7 = G.endless && isR7Wave(wave);
+  const plan = r7 ? [] : buildRoomPlan(wave);
   G.roomSpawnPlan = plan;
   G.roomSpawnIndex = 0;
   G.left = plan.length;
@@ -431,17 +535,26 @@ export function beginRoom(wave) {
   // 新房重新开始算"无伤"
   G.roomHurt = false;
 
-  // 首领房：重置三个"本房首领"标记并设倒计时；普通房倒计时就是 0
-  const isBossRoom = wave % ROOM.PER_ROUND === 0;
+  // 首领房：重置本房首领状态并设倒计时；普通房倒计时就是 0
+  const isBossRoom = isBossRoomWave(wave);
+  if (G.endless && isBossRoom) G.bossEncounter++;
   G.bossSpawnedThisRoom = false;
   G.bossDefeatedThisRoom = false;
   G.bossRewardClaimed = false;
+  G.bossPairSize = 1;
+  G.bossSpawnCountThisRoom = 0;
+  G.pendingBossSpawn = null;
+  G.r7State = 'idle';
+  G.r7RespawnTimer = 0;
+  if (r7) G.r7Time = 0;
   G.bossCountdownRemaining = isBossRoom ? ROOM.BOSS_COUNTDOWN : 0;
 
   // 精英随房数增加总数：10–19 房 1 只，20 房起 2 只，9 房以前不刷。
   let eliteCount = 0;
-  if (wave >= ENEMY.ELITE_TWO_FROM_WAVE) eliteCount = 2;
-  else if (wave >= ENEMY.ELITE_FROM_WAVE) eliteCount = 1;
+  if (!r7) {
+    if (wave >= ENEMY.ELITE_TWO_FROM_WAVE) eliteCount = 2;
+    else if (wave >= ENEMY.ELITE_FROM_WAVE) eliteCount = 1;
+  }
   for (let i = 0; i < eliteCount; i++) {
     spawnEnemy('elite');
   }
@@ -511,8 +624,9 @@ export function buildRelicCard(def, nextLevel) {
 }
 
 /**
- * 抽一张遗物卡：指定类别内先按 50/50 决定"新遗物 / 升级已有"，
- * 所选池空就自动换到另一边；整类都空再换另一类。返回 null 表示两类都没货。
+ * 抽一张遗物卡：普通遗物先按 50/50 决定“新遗物 / 升级已有”，
+ * 所选池空就自动换到另一边；特殊遗物则在所有未满级里等概率抽。
+ * 整类都空返回 null，由 openReward 用应急修复补齐。
  */
 export function pickRelicCandidate(kind, used) {
   const p = G.p;
@@ -521,6 +635,19 @@ export function pickRelicCandidate(kind, used) {
     const defs = RELIC_DEFS.filter(
       (def) => def.kind === wantedKind && !used.has(def.id)
     );
+
+    // 特殊遗物只有 3 件：不再先 50/50 分“新/升级”，否则拥有的那件会长期霸屏。
+    // 把“未拥有 + 已拥有但没满级”放在同一个池里，每件等概率。
+    if (wantedKind === 'special') {
+      const pool = defs.filter(
+        (def) => (p.relicLevels[def.id] || 0) < RELIC_MAX[def.kind]
+      );
+      if (!pool.length) return null;
+      const def = pool[Math.floor(Math.random() * pool.length)];
+      const nextLevel = (p.relicLevels[def.id] || 0) + 1;
+      return buildRelicCard(def, nextLevel);
+    }
+
     const fresh = defs.filter((def) => !p.relicLevels[def.id]);
     const upgradeable = defs.filter(
       (def) => p.relicLevels[def.id] && p.relicLevels[def.id] < RELIC_MAX[def.kind]
@@ -611,6 +738,11 @@ export function openReward(kind) {
         cards = new Array(ROOM.REWARD_CHOICES).fill(REWARD.HEAL_CARD);
       } else {
         G.rewardCards = [];
+        // 第 45 房奖励池为空时同样直接通关，不能退回装配室
+        if (campaignComplete()) {
+          enterVictory();
+          return;
+        }
         G.state = 'route';
         if (routeHook) routeHook();
         return;
@@ -703,6 +835,12 @@ export function pickReward(index) {
     return;
   }
 
+  // 第 45 房首领奖励选完：直接通关，不弹装配室
+  if (campaignComplete()) {
+    enterVictory();
+    return;
+  }
+
   // 普通房和首领房统一先进装配室；wave++ / beginRoom 交给 confirmRoute
   G.state = 'route';
   if (routeHook) routeHook();
@@ -732,10 +870,20 @@ export function restartRun() {
   G.bossRewardClaimed = false;
   G.bossSpawnedThisRoom = false;
   G.bossCountdownRemaining = 0;
+  G.bossEncounter = 0;
+  G.bossPairSize = 1;
+  G.bossSpawnCountThisRoom = 0;
+  G.pendingBossSpawn = null;
+  G.r7State = 'idle';
+  G.r7RespawnTimer = 0;
+  G.r7Time = 0;
   G.rewardKind = 'stat';
   G.rewardCards = [];
   G.notice.timer = 0;
   G.route = 'normal';
+  G.endless = false;
+  G.cleared = false;
+  G.bestScore = readCampaignBest().score;
 
   // 攻击模式回到默认：自动攻击开、鼠标没按着、闪电链冷却清零
   G.autoAttack = true;
@@ -793,6 +941,15 @@ export function update(dt) {
   G.shake = Math.max(0, G.shake - SHAKE.DECAY * dt);
 
   G.time += dt;            // a. 本局计时
+
+  // R7 绝对死亡：按存活时间持续加分（取整，保持分数是整数）。
+  if (G.endless && isR7Wave(G.wave) && G.state === 'play') {
+    const before = Math.floor(G.r7Time * ADVANCED.R7_SCORE_PER_SECOND);
+    G.r7Time += dt;
+    const after = Math.floor(G.r7Time * ADVANCED.R7_SCORE_PER_SECOND);
+    G.score += after - before;
+  }
+
   updatePlayer(dt);        // b. 玩家移动 / 冲刺 / 冷却
   updateBossCountdown(dt); // c. 首领房入场倒计时（到点刷 Boss）
   updateSpawn(dt);         // d. 按本房计划刷怪
@@ -815,13 +972,16 @@ export function update(dt) {
   if (G.p.hp <= 0 && G.state === 'play') {
     G.p.hp = 0;
     G.state = 'dead';
+    G.bestScore = Math.max(G.bestScore, updateCampaignBest(false).score);
     return;
   }
 
   if (G.state !== 'play') return;
 
-  // m. 首领房：Boss 一死立刻开四选一遗物面板，不等小怪清完
-  if (G.wave % ROOM.PER_ROUND === 0) {
+  // m. 首领房：Boss 一死立刻开四选一遗物面板，不等小怪清完。
+  //    R7 绝对死亡不结算清房，补位由 updateBossCountdown 负责。
+  if (isBossRoomWave(G.wave)) {
+    if (isR7Wave(G.wave)) return;
     if (G.bossDefeatedThisRoom && !G.bossRewardClaimed) {
       G.bossRewardClaimed = true;
       finishRoom('relic');

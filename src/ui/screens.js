@@ -314,6 +314,7 @@ let routeSlotsEl = null;
 let routeBackupEl = null;
 let routeContinueBtn = null;
 let routeBound = false;
+let routeBackupBound = false;
 
 /** 第一次调用时抓住装配室节点，并只绑定一次"继续深入"按钮。 */
 function cacheRouteDom() {
@@ -485,6 +486,7 @@ function renderRoute() {
 export function showRoute() {
   cacheRouteDom();
   bindRouteContinue();
+  bindRouteBackup();
   renderRoute();
   routePanel.classList.remove('hidden');
 }
@@ -493,6 +495,36 @@ export function showRoute() {
 export function hideRoute() {
   cacheRouteDom();
   routePanel.classList.add('hidden');
+}
+
+/**
+ * 备选库接住从槽位拖出来的遗物：清空那个槽，但遗物仍留在本局收藏里。
+ * 只绑一次，避免每次 renderRoute 重复堆事件。
+ */
+function bindRouteBackup() {
+  if (!routeBackupEl || routeBackupBound) return;
+  routeBackupBound = true;
+
+  routeBackupEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    routeBackupEl.classList.add('over');
+  });
+  routeBackupEl.addEventListener('dragleave', (e) => {
+    // 指针还在备选库内部移动时不要闪掉高亮
+    if (!routeBackupEl.contains(e.relatedTarget)) {
+      routeBackupEl.classList.remove('over');
+    }
+  });
+  routeBackupEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    routeBackupEl.classList.remove('over');
+    const dropped = e.dataTransfer ? e.dataTransfer.getData('text/plain') : '';
+    if (!dropped) return;
+    const idx = G.p.relicSlots.indexOf(dropped);
+    if (idx === -1) return; // 本来就是备选库里的，不用处理
+    G.p.relicSlots[idx] = null;
+    renderRoute();
+  });
 }
 
 // 「继续深入」只绑一次：应用装配结果并开下一房

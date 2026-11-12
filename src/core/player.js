@@ -26,7 +26,6 @@ import {
 } from '../config.js';
 import { G } from './state.js';
 import { sfxHurt } from './audio.js';
-import { bossArchetypeIndex } from './boss.js';
 import { spawnCombatText } from './combat.js';
 
 /* ---------------- 输入状态 ---------------- */
@@ -57,11 +56,12 @@ export function relicLevel(id) {
 }
 
 /**
- * 玩家受伤的唯一新入口：无敌帧内直接忽略，否则固定扣 20。
- * 自爆蛛、精英自爆等新机制都走这里，避免各写一份漏掉计数。
+ * 玩家受伤的唯一新入口：无敌帧内直接忽略，否则扣血。
+ * 默认扣 20；Boss 突刺等特殊招式可以传入更高伤害。
+ * @param {number} amount 本次伤害，默认 PLAYER.hurtDamage
  * @returns {boolean} 是否真的扣血
  */
-export function hurtPlayer() {
+export function hurtPlayer(amount = PLAYER.hurtDamage) {
   const p = G.p;
 
   // 沙盒模式：伤害判定照常发生（子弹会消失、自爆会触发），但血量永远不掉
@@ -69,7 +69,7 @@ export function hurtPlayer() {
 
   if (p.inv > 0) return false;
 
-  p.hp -= PLAYER.hurtDamage;
+  p.hp -= amount;
   p.hits++;
   p.inv = PLAYER.hurtInv;
   p.hurtFlash = PLAYER.hurtInv;
@@ -86,7 +86,6 @@ export function spawnPickup(x, y) {
   G.pickups.push({
     x,
     y,
-    life: PICKUP.LIFE,
     age: 0,
   });
   while (G.pickups.length > PICKUP.MAX) {
@@ -107,6 +106,7 @@ export function updatePlayer(dt) {
   p.hurtFlash = Math.max(0, (p.hurtFlash || 0) - dt);
   p.dashCD = Math.max(0, p.dashCD - dt);
   p.dash = Math.max(0, p.dash - dt);
+  p.frostSlowTime = Math.max(0, (p.frostSlowTime || 0) - dt);
 
   // 方向：右减左 = 水平方向，下减上 = 垂直方向
   let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
@@ -129,14 +129,26 @@ export function updatePlayer(dt) {
   // 冲刺中速度乘倍率，平时就是基础速度
   let speed = p.speed * (p.dash > 0 ? PLAYER.dashMul : 1);
 
-  // 霜环裁决者的减速领域：站在冰蓝圈里移速减半
-  const frostBoss = G.enemies.find((e) => e.type === 'boss' && bossArchetypeIndex(e) === 1);
-  if (
-    frostBoss &&
-    Math.hypot(p.x - frostBoss.x, p.y - frostBoss.y) < BOSS.MUTATION.FROST_FIELD_RADIUS
-  ) {
-    speed *= 1 - BOSS.MUTATION.FROST_FIELD_SLOW;
+  // 冰圈、本体光环和冰弹减速只取最强值，只修改本帧局部速度。
+  let inFrost = false;
+  for (const h of G.bossHazards) {
+    if (h.kind !== 'frostZone' || h.age < (h.warn || 0) || h.age >= h.life) continue;
+    if (Math.hypot(p.x - h.x, p.y - h.y) < h.r) {
+      inFrost = true;
+      break;
+    }
   }
+  const cfg = BOSS.FROST;
+  const inAura = G.enemies.some(e => e.type === 'boss' && e.bossIndex === 1 && e.hp > 0
+    && Math.hypot(p.x - e.x, p.y - e.y) < cfg.playerAura);
+  // 第 3 轮极寒终极：常驻减速领域，和冰圈/光环取最强的一档。
+  const inFrostField = G.enemies.some(e => e.type === 'boss' && e.ultimate === 1 && e.hp > 0
+    && Math.hypot(p.x - e.x, p.y - e.y) < BOSS.MUTATION.FROST_FIELD_RADIUS);
+  const slow = Math.max(inFrost ? cfg.zoneSlow : 0,
+    inAura ? cfg.auraSlow : 0,
+    inFrostField ? BOSS.MUTATION.FROST_FIELD_SLOW : 0,
+    p.frostSlowTime > 0 ? cfg.iceShotSlow : 0);
+  speed *= 1 - slow;
 
   p.x += dx * speed * dt;
   p.y += dy * speed * dt;
@@ -146,13 +158,15 @@ export function updatePlayer(dt) {
   p.y = Math.max(ARENA.MARGIN_TOP, Math.min(CANVAS.HEIGHT - ARENA.MARGIN_BOTTOM, p.y));
 }
 
-/** 每帧推进血包：走近自动拾取、回血并飘绿字；超时消失。 */
+/** 每帧推进血包：走近自动拾取、回血并飘绿字；血包不再随时间消失。 */
 export function updatePickups(dt) {
   const p = G.p;
   for (let i = G.pickups.length - 1; i >= 0; i--) {
     const q = G.pickups[i];
-    q.life -= dt;
     q.age += dt;
+
+    // 满血时不碰血包，让它留在原地等玩家掉血后再捡
+    if (p.hp >= p.max) continue;
 
     const dx = q.x - p.x;
     const dy = q.y - p.y;
@@ -166,7 +180,6 @@ export function updatePickups(dt) {
       continue;
     }
 
-    if (q.life <= 0) G.pickups.splice(i, 1);
   }
 }
 

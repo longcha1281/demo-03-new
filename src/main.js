@@ -10,22 +10,24 @@
 // ============================================================
 
 import { G } from './core/state.js';
-import { CANVAS, LIMITS } from './config.js';
+import { CANVAS, LIMITS, ENCHANT } from './config.js';
 import { initCanvas, draw, HUD_BUTTONS } from './render/canvas.js';
 import { spawnEnemy } from './core/enemy.js';
+import { spawnBoss } from './core/boss.js';
 import {
   update,
   setKey,
   clearInput,
   restartRun,
   togglePause,
+  beginRoom,
   setRewardHook,
   selectCore,
   selectSecondary,
   setRouteHook,
   setSecondaryHook as setSecondaryPanelHook,
 } from './core/systems.js';
-import { initAudio, setMusicPaused, toggleMute } from './core/audio.js';
+import { initAudio, setMusicPaused, resetMusic, toggleMute } from './core/audio.js';
 import {
   showReward,
   hideReward,
@@ -223,11 +225,19 @@ const btnRestart = document.getElementById('btn-restart');
 // F2 调试台打开时，暂停遮罩暂时让位；关闭后按原暂停状态恢复。
 let debugPanelOpen = false;
 
-/** 让暂停遮罩跟着游戏状态显示 / 隐藏（只有 paused 且调试台没开才显示），同时暂停/恢复 BGM。 */
+// 音乐只跟随战斗状态；奖励、装配、死亡和暂停均保留播放位置。
+let lastMusicState;
+function syncMusicState() {
+  if (lastMusicState === G.state) return;
+  lastMusicState = G.state;
+  setMusicPaused(G.state !== 'play');
+}
+
+/** 同步暂停遮罩和音乐，不改变游戏逻辑。 */
 function syncPauseUI() {
   const paused = G.state === 'paused';
   pauseMenu.classList.toggle('hidden', !paused || debugPanelOpen);
-  setMusicPaused(paused);
+  syncMusicState();
 }
 
 // 开局先同步一次（HTML 里默认就是 hidden，这里保证状态一致）
@@ -270,7 +280,21 @@ const debugSpecials = document.getElementById('debug-specials');
 const debugClear = document.getElementById('debug-clear');
 const debugSandbox = document.getElementById('debug-sandbox');
 const debugSpawn = document.getElementById('debug-spawn');
+const debugBoss = document.getElementById('debug-boss');
 const debugClearEnemies = document.getElementById('debug-clear-enemies');
+const debugAdvanced = document.getElementById('debug-advanced');
+
+// 调试台“刷 Boss”从第 1 只开始轮换，方便按顺序测五种形态
+let debugBossNumber = 1;
+
+// 进阶考核：按 R4→R5→R6→R7 轮换，直接跳进对应 Boss 战。
+const DEBUG_ADVANCED_STAGES = [
+  { label: 'R4', wave: 47, bossEncounter: 15 },
+  { label: 'R5', wave: 57, bossEncounter: 20 },
+  { label: 'R6', wave: 67, bossEncounter: 25 },
+  { label: 'R7', wave: 76, bossEncounter: 30 },
+];
+let debugAdvancedIndex = 0;
 
 const DEBUG_MAX_LEVEL = 3; // 调试台允许把任意遗物调到 3 级
 let debugDragPayload = null;
@@ -368,6 +392,20 @@ function equipDebugRelic(id) {
 function equipDebugSpecial(id) {
   G.p.relicSlots[3] = id;
   ensureDebugRelic(id);
+
+  // 调试台没有正常的选副元素流程，直接随机补一个与主元素不同的副元素，
+  // 这样在 F2 里点“元素混合”就能立刻看到双环 / 双 Debuff。
+  if (id === 'elementMix' && !G.p.enchantState.secondaryUnlocked) {
+    const options = ENCHANT.CORES.filter((core) => core.id !== G.p.core);
+    const picked = options[Math.floor(Math.random() * options.length)];
+    if (picked) {
+      G.p.enchantState.secondaryId = picked.id;
+      G.p.enchantState.secondaryUnlocked = true;
+      G.p.enchantState.secondaryUnlockSource = 'debug';
+      G.pendingSecondarySelection = false;
+    }
+  }
+
   renderDebugAll();
 }
 
@@ -566,6 +604,24 @@ debugLibrary.addEventListener('click', (e) => handleDebugItemClick(e, 'library')
 debugLibrary.addEventListener('dragstart', (e) => beginDebugDrag(e, 'library'));
 debugLibrary.addEventListener('dragend', finishDebugDrag);
 
+// 从槽位拖回备选库：清空对应槽位，遗物仍留在收藏里，可再次拖出。
+debugLibrary.addEventListener('dragover', (e) => {
+  e.preventDefault(); // 允许放下
+});
+debugLibrary.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const payload = readDebugPayload(e);
+  debugDragPayload = null;
+  if (!payload || payload.source !== 'slot') return;
+
+  const from = payload.slot;
+  if (from < 0 || from > 2) return;
+  if (G.p.relicSlots[from] !== payload.id) return;
+
+  G.p.relicSlots[from] = null;
+  renderDebugAll();
+});
+
 // 槽位内部：拖拽互换；点 +/- 调等级。
 debugSlotsEl.addEventListener('click', (e) => handleDebugItemClick(e, 'slot'));
 debugSlotsEl.addEventListener('dragstart', (e) => beginDebugDrag(e, 'slot'));
@@ -600,8 +656,37 @@ debugSpawn.addEventListener('click', () => {
   spawnDebugWave();
 });
 
+// 刷 Boss：清掉当前怪和弹幕后，按 1→5 轮换生成五种基础形态，方便逐个试手感
+debugBoss.addEventListener('click', () => {
+  if (G.state !== 'play' && G.state !== 'paused') return;
+
+  G.enemies.length = 0;
+  G.hostile.length = 0;
+  G.bossHazards.length = 0;
+  G.bossGhosts.length = 0;
+  spawnBoss(debugBossNumber);
+  debugBossNumber = (debugBossNumber % 5) + 1;
+});
+
 // 清怪：同时清掉敌弹和首领危险区，避免清完还被残留弹幕打到。
 debugClearEnemies.addEventListener('click', clearDebugEnemies);
+
+// 进阶考核：按任务卡设 wave / bossEncounter，beginRoom 会给 Boss 房再 +1。
+debugAdvanced.addEventListener('click', () => {
+  if (G.state !== 'play' && G.state !== 'paused') return;
+
+  const stage = DEBUG_ADVANCED_STAGES[debugAdvancedIndex];
+  debugAdvancedIndex = (debugAdvancedIndex + 1) % DEBUG_ADVANCED_STAGES.length;
+
+  G.endless = true;
+  G.isSandbox = false;
+  G.wave = stage.wave;
+  G.bossEncounter = stage.bossEncounter;
+  G.state = 'play';
+  beginRoom(stage.wave);
+  debugAdvanced.textContent = '进阶考核 ' + stage.label;
+  syncDebugSandbox();
+});
 
 // 页面启动时先把隐藏面板的内容画好；F2 打开时直接显示。
 renderDebugAll();
@@ -683,6 +768,18 @@ window.addEventListener('keydown', (e) => {
   ) {
     e.preventDefault();
   }
+  // 胜利结算按 R：重开一局并回到星核选择（本作没有独立标题页，星核选择即标题）。
+  // E 进入无尽交给 setKey 处理，不在这里拦截。
+  if (G.state === 'victory' && e.code === 'KeyR' && !e.repeat) {
+    restartRun();
+    G.state = 'core-select';
+    showCoreSelect();
+    resetMusic();
+    syncPauseUI();
+    return;
+  }
+
+  if (e.code === 'KeyR' && G.state === 'dead') resetMusic();
   setKey(e.code, true);
 
 });
@@ -718,14 +815,17 @@ btnRestart.addEventListener('click', () => {
   hideReward();          // 奖励面板如果还开着，一并收起
   hideCoreSelect();      // 星核面板同理（重开保留已选核心，不再弹）
   hideRoute();           // 装配室也收起
-  setMusicPaused(false); // 重开后回到 play，音乐也跟着恢复
+  resetMusic();         // 新一局从乐曲开头开始
   syncPauseUI();
 });
 
 // ---- 9. 音频解锁 ----
-// 浏览器不允许在没有用户手势时创建/播放音频，第一次按键或点击时初始化一次
-window.addEventListener('keydown', initAudio, { once: true });
-window.addEventListener('pointerdown', initAudio, { once: true });
+// 在真实手势内解锁；复用上下文，也允许浏览器意外挂起后再次尝试恢复
+window.addEventListener('keydown', initAudio);
+window.addEventListener('pointerdown', initAudio);
 
 // ---- 10. 启动主循环 ----
-startLoop(update, draw);
+startLoop(update, () => {
+  syncMusicState(); // 仅状态变化时启停，不在每帧重复操作音源。
+  draw();
+});

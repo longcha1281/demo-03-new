@@ -15,7 +15,8 @@ export function createBaseCastData(player) {
   return {
     count: 1,             // 最终子弹数（如果后面遇到裂变，母弹数会被快照定格）
     spread: 0,            // 扇形张角（弧度）
-    form: 'default',      // 子弹形态：default / lightning
+    form: 'default',      // 母弹形态：default / lightning
+    childLightning: false, // 闪电排在裂变之后时，只让子代变闪电，母弹保持普通
     tags: [],             // 命中效果标签：pierce / homing / fission
     fissionCount: 0,      // 遇到裂变那一刻的子弹数快照
     fissionSpread: 0,     // 遇到裂变那一刻的张角快照
@@ -68,8 +69,16 @@ export function applyBoomerang(castData) {
   return castData;
 }
 
-/** 闪电：把子弹形态改成 lightning，开火时换成高速短寿命弹。 */
+/**
+ * 闪电：严格按槽位顺序决定形态。
+ * 闪电在裂变之前 —— 母弹就是闪电；
+ * 闪电在裂变之后 —— 母弹保持普通物理弹，只把子代标记成闪电。
+ */
 export function applyLightning(castData) {
+  if (castData.tags.includes('fission')) {
+    castData.childLightning = true;
+    return castData;
+  }
   castData.form = 'lightning';
   return castData;
 }

@@ -400,6 +400,8 @@ export function drawLightningArcs() {
   const color = LIGHTNING_FX.COLORS[core] || LIGHTNING_FX.COLORS.default;
 
   ctx.save();
+  ctx.lineJoin = 'round';   // 折点用圆角，避免尖角看起来像方块
+  ctx.lineCap = 'round';    // 线头也圆，命中点不会变成方形小点
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
   ctx.shadowColor = color;
@@ -411,6 +413,18 @@ export function drawLightningArcs() {
     // alpha 跟着剩余寿命一起淡出
     ctx.globalAlpha = Math.max(0, arc.life / arc.maxLife);
 
+    // 先画一层更粗的暗光，再画细亮线，闪电才有“电光”层次
+    ctx.globalAlpha *= 0.22;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(arc.points[0].x, arc.points[0].y);
+    for (let i = 1; i < arc.points.length; i++) {
+      ctx.lineTo(arc.points[i].x, arc.points[i].y);
+    }
+    ctx.stroke();
+
+    ctx.globalAlpha = Math.max(0, arc.life / arc.maxLife);
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(arc.points[0].x, arc.points[0].y);
     for (let i = 1; i < arc.points.length; i++) {

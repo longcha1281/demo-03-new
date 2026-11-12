@@ -80,7 +80,7 @@ export const LIMITS = {
   enchantZones: 6,    // 附魔地面区域（火爆炸/黑洞）最多 6 个
   combatTexts: 24,    // 伤害飘字最多 24 条
   bursts: 64,         // 爆炸冲击波最多 64 个（自爆蛛同帧爆炸时防止无界增长）
-  bossHazards: 24,    // 首领地面/激光危险区最多 24 个（火焰节点、冰环、激光）
+  bossHazards: 32,    // 首领危险区最多 32 个（第 3 轮火焰节点/激光会同时占用多条）
   bossGhosts: 8,      // 首领瞬移残影最多 8 个（纯视觉）
 };
 
@@ -96,15 +96,20 @@ export const ENEMY = {
     tank:    { hp: 65,  speed: 24.2, score: 60 },   // 重甲：慢但厚（旧类型，仍保留兼容）
     shooter: { hp: 30,  speed: 39.6, score: 60 },   // 射手：会远程（原 36，+10%）
     bomber:  { hp: 12,  speed: 75,   score: 50 },   // 自爆蛛：低血、沉重，靠近后点燃引信
-    splitter:{ hp: 40,  speed: 32,   score: 50 },   // 分裂体：绿色双圆，死亡裂成 2 只小追猎
+    splitter:{ hp: 40,  speed: 32,   score: 50, color: '#ff4d6d' },   // 分裂体：红色双圆，死亡裂成 2 只小追猎
     elite:   { hp: 150, speed: 39.6, score: 250 },  // 精英：三连扇形弹 / 辅助光环
     boss:    { hp: 548, speed: 34, score: 1500 }, // 首领：血量真实值由 BOSS.HP 公式算
   },
 
   HP_GROWTH_PER_WAVE: 12,   // 每房普通/重甲血量 +12
   HP_GROWTH_CAP_WAVE: 25,   // growth = min(24, wave-1)，第 25 房封顶
+  HP_GROWTH_LATE_PER_WAVE: 4,   // 第 25 房后普通/重甲每房再 +4 血
+  HP_LATE_CAP: 440,         // 普通/重甲后期血量上限
   SPEED_GROWTH_PER_WAVE: 2.0, // 每房移速 +2
-  SPEED_CAP: 120,           // 移速上限
+  SPEED_GROWTH_LATE_PER_WAVE: 0.4, // 第 25 房后每房再 +0.4 移速
+  SPEED_CAP: 150,           // 移速上限（后期成长用）
+  ELITE_HP_GROWTH_LATE: 8,  // 第 25 房后精英每房 +8 血
+  ELITE_HP_LATE_CAP: 1000,  // 精英后期血量上限
   ELITE_HP_BASE: 150,       // 精英血量 = min(460, 150 + 20×growth)
   ELITE_HP_PER_GROWTH: 20,
   ELITE_HP_CAP: 460,
@@ -226,11 +231,11 @@ export const BOSS = {
 
   /* ---------------- 大任务20：首领「三轮大循环」 ----------------
      每 5 只首领算一轮：
-     第 1 轮正常；第 2 轮血量/伤害 ×1.5 并随机 1 个词缀；
-     第 3 轮起血量/伤害 ×2，并按原型强制质变（不再放普通环形弹）。 */
+     第 1 轮正常；第 2 轮血量 ×1.4；
+     第 3 轮及无尽模式血量 ×1.85，并按原型强制质变（不再放普通环形弹）。 */
   BOSSES_PER_ROUND: 5,       // 每轮 5 只首领
-  ROUND2_HP_MUL: 1.5,        // 第 2 轮血量倍率
-  ROUND3_HP_MUL: 2.0,        // 第 3 轮及以后血量倍率
+  ROUND2_HP_MUL: 1.4,        // 第 2 轮血量倍率
+  ROUND3_HP_MUL: 1.85,       // 第 3 轮及以后血量倍率
   ROUND2_DAMAGE_MUL: 1.5,    // 第 2 轮伤害倍率（只记录/展示，实际受击仍固定 20）
   ROUND3_DAMAGE_MUL: 2.0,    // 第 3 轮及以后伤害倍率（同上）
 
@@ -241,6 +246,7 @@ export const BOSS = {
     SHIELD_RATIO: 0.30,      // 词缀·护盾：护盾量 = 最大生命 30%
     RAGE_RATE_MUL: 1.3,      // 词缀·暴怒：出招/攻击冷却推进速度 ×1.3
     TELEPORT_CD: 5,          // 词缀·瞬移：每 5 秒一次
+    TELEPORT_WARN: 0.3,      // 瞬移前闪烁预警 0.3 秒
     TELEPORT_DIST: 150,      // 瞬移到离玩家 150px 的位置
     GHOST_LIFE: 0.4,         // 瞬移后原地残影存活 0.4 秒
   },
@@ -260,8 +266,9 @@ export const BOSS = {
     FROST_FIELD_RADIUS: 170, // 冰蓝减速领域半径
     FROST_FIELD_SLOW: 0.5,   // 玩家踩进去移速 ×0.5
     FROST_RING_CD: 7,
+    FROST_RING_WARN: 0.8,    // 冰环出现后先预警 0.8 秒再开始收缩
     FROST_RING_START_RADIUS: 600,
-    FROST_RING_LIFE: 5,      // 收缩到 0 所需秒数
+    FROST_RING_LIFE: 5,      // 收缩到 0 所需秒数（含预警）
     FROST_RING_WIDTH: 16,    // 环带宽 16px
     FROST_RING_GAP: 1.0,     // 缺口弧度（约 57°）
 
@@ -274,7 +281,7 @@ export const BOSS = {
     // 虚空织巢者：每 4 秒 10 发慢速强追踪紫球，命中玩家后分裂 2 发小球
     VOID_ORB_CD: 4,
     VOID_ORB_COUNT: 10,
-    VOID_ORB_SPEED: 55,
+    VOID_ORB_SPEED: 120,
     VOID_ORB_TURN: 2.6,
     VOID_ORB_LIFE: 7,
     VOID_ORB_RADIUS: 6,
@@ -307,14 +314,155 @@ export const BOSS = {
   RING_CD_STEP: 0.2,
   RING_CD_MIN: 0.9,     // 出招间隔下限
 
-  // 五个原型按 (首领序号-1) % 5 轮换；第 3 轮起各自质变
+  /* 重构后只保留第一个首领「裂隙刺客」。HUD 读 .name，别删这个字段。 */
   ARCHETYPES: [
-    { name: '裂隙追猎者', speed: 34, cadence: 0.88, summon: 'runner' },
-    { name: '霜环裁决者', speed: 18, cadence: 0.95, summon: 'shooter' },
-    { name: '熔核攻城兽', speed: 24, cadence: 0.82, summon: 'tank' },
-    { name: '虚空织巢者', speed: 25, cadence: 0.90, summon: 'shooter' },
-    { name: '终焉之瞳', speed: 20, cadence: 0.90, summon: 'shooter' },
+    { name: '裂隙刺客', speed: 80 },
   ],
+
+  /* ---------------- 裂隙刺客（唯一实装的首领） ----------------
+     高速贴身追击；接触造成伤害后向反方向弹开，留出输出窗口。
+     每 2.5 秒随机生成 1–2 条贯穿屏幕的切割线：0.8 秒细红线预警，
+     之后 0.3 秒紫红激光，爆发期间碰到扣 20。 */
+  RIFT: {
+    name: '裂隙刺客',
+    color: '#d946ef',      // 紫红主色
+    hp: 800,               // 固定基础血量（不再按轮数成长）
+    speed: 100,            // 一直追玩家，不保持距离（中等偏上的压迫速度）
+    contactRecoil: 70,     // 接触伤害后向反方向弹开的距离
+    skillCd: 2.5,          // 两次全屏切割的间隔
+
+    /* --- 突刺：前摇锁方向，突刺期间高速位移，结束后硬直 --- */
+    dashCd: 3,             // 两次突刺的间隔（从前摇开始算）
+    dashWarn: 0.8,         // 前摇锁定方向，双轨走廊预警
+    dashTime: 0.26,        // 突刺持续时长
+    dashSpeed: 850,        // 突刺速度 px/s（约 221px 位移）
+    dashDamage: 20,        // 展示/兼容字段，实际伤害走 hurtPlayer()
+    dashKnockback: 55,     // 突刺命中后把玩家推开的距离
+    dashRecover: 1,        // 突刺结束后的硬直时长，期间不移动
+    warn: 1.2,             // 红线预警时长（纯视觉、无伤害）
+    active: 0.5,           // 激光爆发时长（只在这段时间判定伤害）
+    linesMin: 2,           // 固定两条垂直交叉线
+    linesMax: 2,           // 每次最多 2 条线
+    lineWidth: 18,         // 激光碰撞/绘制宽度
+    lineLength: 2000,      // 线长，保证贯穿整个屏幕
+    lineSpread: 0,         // 两条线共用 Boss 位置，不做随机偏移
+    trailMax: 4,           // 残影最多保留 4 个历史坐标
+    trailAlpha: 0.35,      // 最近一个残影的不透明度
+    anglePairs: [[0, Math.PI / 2], [Math.PI / 4, -Math.PI / 4]], // 十字或斜十字
+    phase2CdMul: 0.85,     // 低于 60% 血量时，仅缩短下一次技能冷却
+  },
+  /* ---------------- 霜环裁决者（第 2 只） ----------------
+     断环冰碑外形（竖向菱形本体 + 断开的霜环），中速追击；
+     地面冰圈只减速，冰弹扇射先锁定方向再开火，
+     新招式「断环裁决」从本体向外扩一圈带缺口的伤害环。 */
+  FROST: {
+    name: '霜环裁决者',
+    color: '#38bdf8',       // 冰青主色
+    hp: 1150,               // 比旧版多 150：招式更重，但击杀时间不拖沓
+    speed: 58,              // 中速追击
+    segments: 12,           // 血条分几段
+    zoneCd: 4,              // 每隔 4 秒放一个冰霜圈
+    zoneRadius: 85,         // 冰圈半径
+    zoneWarn: 0.9,          // 冰蓝预警期间不减速
+    zoneDuration: 4,        // 预警结束后的减速持续时间
+    zoneMax: 3,             // 预警圈与生效圈合计上限
+    zoneSlow: 0.25,         // 生效冰圈内移速 -25%，同类不叠加
+    phase2CdMul: 0.82,      // 低于 60% 血量时缩短技能冷却
+    playerAura: 90,         // 本体附近的玩家减速范围
+    auraSlow: 0.18,         // 本体光环减速18%，与其他减速取最强值
+    iceShotCd: 4,           // 每 4 秒来一轮扇形冰弹，独立于冰圈
+    iceShotWarn: 0.55,      // 开火前定格瞄准 0.55 秒，看到三道冷光就能侧闪
+    iceShotCount: 3,        // 一阶段 3 发
+    iceShotPhase2Count: 5,  // 低于 60% 血量时 5 发
+    iceShotSpread: 0.22,    // 相邻冰弹夹角 rad
+    iceShotSpeed: 130,
+    iceShotLife: 5,
+    iceShotSlow: 0.2,       // 命中后减速20%
+    iceShotSlowTime: 1.2,
+    bulletAura: 100,        // 本体周围 100px 是子弹减速光环
+    bulletSlow: 0.5,        // 光环内玩家子弹速度 ×0.5
+
+    /* 断环裁决：一轮从本体向外扩开的伤害环，环上留一个安全缺口 */
+    ringCd: 9,              // 每 9 秒一次（二阶段 ×phase2CdMul）
+    ringStartR: 60,         // 预警起始半径：贴着本体亮起，便于判断圆心
+    ringEndR: 250,          // 预警结束时扩到的半径（伤害环落点）
+    ringWarn: 1.1,          // 扩张预警时长，期间不伤人
+    ringActive: 0.35,       // 环带落地判定时长，只在这 0.35 秒伤人
+    ringWidth: 22,          // 环带宽度；环很薄，冲刺/走位能穿过去
+    ringGap: Math.PI * 100 / 180, // 缺口 100°：绕到缺口或站环内都安全
+    ringPauseAfter: 0.45,   // 落地后本体再停 0.45 秒，给玩家反打窗口
+  },
+
+  /* ---------------- 熔核巨像（第 3 只基础雏形） ----------------
+     橙色实心方块，极慢；每 5 秒在玩家脚下埋一个岩浆圈。 */
+  MOLTEN: {
+    name: '熔核巨像',
+    color: '#f97316',       // 熔岩橙
+    hp: 2600,               // 血厚，靠分段血条体现“装甲很厚”
+    speed: 20,              // 极慢
+    segments: 20,           // 血条分 20 段
+    magmaCd: 5,             // 每 5 秒一次
+    magmaRadius: 75,        // 岩浆圈半径
+    magmaWarn: 1,           // 1 秒预警
+    magmaDuration: 4,       // 激活后的持续危险时间
+    magmaDamage: 20,        // 展示字段，实际伤害走 hurtPlayer()
+    magmaTick: 0.8,         // 每次实际命中后的伤害间隔
+    magmaMax: 3,            // 预警与生效岩浆合计上限
+    armorReduction: 0.2,   // 常态减伤 20%
+    exposeTime: 2,          // 岩浆喷发后暴露 2 秒
+    exposeDamageMul: 1.2,  // 暴露时取消减伤，承伤增加 20%
+    phase2CdMul: 0.85,      // 阶段 2 只缩短下一次冷却
+  },
+
+  /* ---------------- 虚空母巢（第 4 只基础雏形） ----------------
+     黑球 + 虚线旋转环，慢速游荡；定期在头顶孵小怪，并轻微吸附玩家子弹。 */
+  VOID: {
+    name: '虚空母巢',
+    color: '#a855f7',       // 暗紫
+    hp: 1300,
+    speed: 45,              // 主动接近与侧移的基础速度
+    segments: 12,
+    spawnCd: 5,             // 从孵化起手计时，预警包含在间隔内
+    spawnWarn: 0.9,        // 孵化囊鼓起后才生成召唤物
+    keepDistance: 180,      // 接近后侧移，过近慢退
+    orbCd: 5.5,            // 虚空弹蓄力起手间隔
+    orbWarn: 0.8,
+    orbSpeed: 320,
+    orbLife: 5,
+    orbTurnRate: 1.4,       // 限时追踪转向 rad/s
+    orbHomingTime: 1.2,
+    spawnCount: 2,          // 一次 2 只
+    spawnMax: 6,            // 场上同时最多 6 只它的召唤物
+    attractRadius: 150,     // 子弹进入 150px 开始受引力转向
+    maxTurnRate: 2.2,       // 引力转向上限 rad/s，不改变速度大小
+    fieldMaxTime: 1.2,      // 场内转向时限，避免永久绕圈
+    phase2CdMul: 0.85,      // 阶段 2 仅缩短下一次召唤冷却
+    minionLife: 12,         // 召唤物存活 12 秒，避免越堆越多
+  },
+
+  /* ---------------- 终焉审判（第 5 只基础雏形） ----------------
+     纯白八边形，原地不动；密集环形弹 + 纯视觉收缩红圈。 */
+  FINAL: {
+    name: '终焉审判',
+    color: '#ffffff',       // 纯白本体
+    edgeColor: '#ff3355',   // 边缘闪烁红线
+    hp: 1800,
+    speed: 25,              // 平时慢速追击，缩圈期间停下
+    segments: 12,
+    ringCd: 3,              // 每 3 秒一圈弹幕
+    ringCount: 16,          // 一圈 16 发
+    ringSpeed: 120,         // 弹速 px/s
+    ringLife: 5,            // 敌弹寿命
+    warnRadius: 520,        // 红色警告圈初始半径（盖住屏幕）
+    warn: 1.5,             // 缩圈预警期不伤人
+    shrinkDuration: 6,     // 安全圈从起始半径平滑缩到下限
+    minSafeRadius: 100,     // 保留走位空间
+    finalWarnLife: 7.5,    // 预警加收缩总时长
+    finalWarnTick: 0.8,    // 圈外每次成功受伤的最短间隔
+    finalWarnRecast: 12,   // 缩圈结束后再计冷却
+    phase2CdMul: 0.85,     // 阶段 2 仅缩短下次技能冷却
+  },
+
   CADENCE_FLOOR: 0.28,  // 出招间隔下限
   CADENCE_STEP: 0.1,    // 每升一阶段，基础节奏 ×0.9（最低 ×0.62）
   ENRAGE_CADENCE_MUL: 0.8, // 暴怒时出招间隔 ×0.8
@@ -370,6 +518,25 @@ export const ROOM = {
   PER_ROUND: 3,         // 每 3 房为一轮
   NORMAL_PER_ROUND: 2,  // 其中 2 普通 + 1 首领
   NOTICE_TIME: 1.6,     // 清房提示在屏幕中央停留的秒数
+};
+
+/* ---------------- 45 房战役 ---------------- */
+export const CAMPAIGN = {
+  TOTAL_ROOMS: 45,         // 正式战役总房数（15 只首领）
+  ENDLESS_HP_GROWTH: 0.04, // 无尽模式每多一只首领，血量额外 +4%
+  ENDLESS_HP_CAP: 1.5,     // 无尽模式额外增幅封顶（+150%）
+  BEST_KEY: 'stellarAwakeningCampaignBest', // 最高分 localStorage 键
+};
+
+/* ---------------- 通关后进阶（R4–R7 双 Boss） ---------------- */
+export const ADVANCED = {
+  START_ENCOUNTER: 15,      // 进入无尽时已是第 15 场，下一只从第 16 场算
+  DUAL_HP_MUL: 0.65,        // 双 Boss 每只只保留 65% 血
+  SECOND_BOSS_DELAY_MIN: 3, // 第二只最早入场（秒）
+  SECOND_BOSS_DELAY_MAX: 5, // 第二只最晚入场（秒）
+  R7_START_WAVE: 76,        // 第 76 房起进入绝对死亡
+  R7_SCORE_PER_SECOND: 20,  // R7 存活每秒加分
+  R7_RESPAWN_DELAY: 3,      // 一对死完到下一对的间隔（秒）
 };
 
 /* ---------------- 属性升级 ----------------
@@ -450,7 +617,7 @@ export const WEAPON = {
   BOOMERANG: {
     STRAIGHT_TIME: 0.15,   // 出程直飞时间（秒）
     ARC_RATE: 0.06,        // 出程直飞后每秒弧线偏转（弧度）
-    MAX_DIST: 150,         // 出程基础射程（px），实际再乘 RANGE_MUL
+    MAX_DIST: 195,         // 出程基础射程（px），实际再乘 RANGE_MUL（195/254/312）
     RANGE_MUL: [1, 1.3, 1.6],      // Lv2 +30%、Lv3 +60%，出程和游离射程都乘它
     FREE_DIST: 320,        // 追踪游离阶段的总射程（px），同样乘 RANGE_MUL
     BUFFER_DIST: 120,      // 返程到玩家后继续直飞的缓冲距离（px）
@@ -506,7 +673,6 @@ export const PICKUP = {
   RADIUS: 10,      // 视觉半径
   PICK_RADIUS: 19, // 拾取判定半径
   HEAL: 20,        // 回复血量
-  LIFE: 15,        // 地上的存活时间（秒）
   MAX: 8,          // 同屏最多几个，防止刷爆
   DROP_CHANCE: 0.15, // 生命汲取 Lv3 击杀掉落概率
 };
@@ -594,9 +760,9 @@ export const RELIC_DEFS = [
   {
     id: 'boomerangCore', name: '回旋镖', kind: 'ordinary', color: '#39f6ff',
     levels: [
-      '出程 0.15s 后折返，返程伤害 80%、速度 100%',
-      '返程伤害 100%、速度 115%',
-      '返程伤害 120%、速度 130%',
+      '基础射程 195；出程 0.15s 后折返，返程伤害 80%、速度 100%',
+      '射程增加 30%（254）；返程伤害 100%、速度 115%',
+      '射程增加 60%（312）；返程伤害 120%、速度 130%',
     ],
   },
   {

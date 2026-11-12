@@ -10,35 +10,28 @@
 //   4) M 键静音，localStorage 记忆；失焦自动停声，回来恢复
 // ============================================================
 
-// AudioContext、总音量、BGM 独立音量。第一次 initAudio() 时创建，之后复用。
+import { createMusic } from './music.js';
+
+// 共用 AudioContext；音效与音乐各用独立总线，M 键统一静音。
 let ctx = null;
 let master = null;
-let musicGain = null;
+let music = null;
 
-// 2 秒白噪声缓冲：踩镲、爆炸、激光瞬态共用，只创建一次
+// 2 秒白噪声缓冲：爆炸、激光瞬态共用，只创建一次
 let noiseBuffer = null;
 
 // 失真曲线：WaveShaper 的查找表，也只创建一次（节点每次新建，避免连接越堆越多）
 let shaperCurve = null;
 
-// BGM 调度器状态：定时器句柄、下一次排谱的时间点、16 分音符步号、是否被暂停
-let bgmTimer = null;
-let nextNoteTime = 0;
-let stepIndex = 0;
-let musicPaused = false;
+// 非战斗默认停乐；main.js 按游戏状态同步。失焦不改变游戏自身状态。
+let musicPaused = true;
+let foreground = true;
 
 // 乒乓延迟总线（只给音效加一点空间感）：左右两条延迟互相喂，最后分到左右声道
 let delaySendGain = null;
 let delayL = null;
 let delayR = null;
 
-// 110 BPM 的十六分音符时长（60 秒 / 110 拍 / 每拍 4 个十六分）
-const STEP_SEC = 60 / 110 / 4;
-// 前瞻调度：每 25ms 看一次，把未来 100ms 内的音符先排进 AudioContext 时间轴
-const SCHEDULE_MS = 25;
-const LOOKAHEAD_SEC = 0.1;
-// BGM 音量上限，避免盖过音效
-const MUSIC_VOLUME = 0.5;
 // 总音量：静音时拉到这里，取消静音再回到 0.3
 const MASTER_VOLUME = 0.3;
 
@@ -90,7 +83,7 @@ export function isMuted() {
   return muted;
 }
 
-// 正在发声的源：振荡器、噪声源、BGM 鼓点、LFO 都在里面。
+// 正在发声的源：音效振荡器、噪声源、LFO 都在里面。
 const activeVoices = new Set();
 // 每个源需要一起断连的后续节点（滤波器、增益、延迟发送等）
 const voiceNodes = new WeakMap();
@@ -121,7 +114,7 @@ function registerVoice(source, nodes = []) {
 }
 
 /**
- * 立刻停掉所有正在播放的声音（音效 + BGM 已排进时间轴的鼓点）。
+ * 立刻停掉所有正在播放的声音（音效；BGM 由独立播放器管理）。
  * 失焦、静音时调用；stop 之后浏览器会异步触发 onended，这里先断连清空。
  */
 function stopAllVoices() {
@@ -148,12 +141,15 @@ function stopAllVoices() {
   activeVoices.clear();
 }
 
-/** 停掉 BGM 调度器；已经排进时间轴的源由 stopAllVoices 负责。 */
+/** 暂停音乐并保留采样位置，也取消尚在合成中的启动。 */
 function stopBgm() {
-  if (bgmTimer !== null) {
-    clearInterval(bgmTimer);
-    bgmTimer = null;
-  }
+  music?.pause();
+}
+
+/** 只在前台、未静音、战斗中播放；异步准备过程由播放器防止重复启动。 */
+function startBgm() {
+  if (!ctx || ctx.state !== 'running' || musicPaused || muted || !foreground) return;
+  void music?.start();
 }
 
 /** 当前音频时刻（秒）；没有 ctx 时给 0，方便 node 里安全调用。 */
@@ -169,7 +165,7 @@ function now() {
 let windowHooksBound = false;
 
 /**
- * 初始化音频：创建 AudioContext + 总音量 + BGM 音量，然后启动 BGM 调度器。
+ * 初始化音频：共用 AudioContext 和总线，战斗状态下启动 32 小节循环。
  * 浏览器要求必须由用户手势（按键/点击）触发，所以由 main.js 在第一次按键/点击时调用。
  * 已经创建过就直接复用；挂起的上下文顺手 resume。
  */
@@ -193,10 +189,8 @@ export function initAudio() {
     master.gain.value = muted ? 0 : MASTER_VOLUME;
     master.connect(ctx.destination);
 
-    // BGM 单独一路 0.5，再汇入 master，避免盖过音效
-    musicGain = ctx.createGain();
-    musicGain.gain.value = MUSIC_VOLUME;
-    musicGain.connect(master);
+    // 音乐走独立总线，避免再次乘音效总音量；不占用音效声部额度。
+    music = createMusic({ context: ctx, destination: ctx.destination, muted });
 
     // 乒乓延迟总线：delayL → 左声道 / delayR → 右声道，
     // delayL 还会把声音喂给 delayR，delayR 再反馈一小部分回 delayL（回声来回弹）
@@ -228,8 +222,8 @@ export function initAudio() {
   }
 
   // 有些浏览器创建后是 suspended，需要用户手势里 resume
-  if (ctx.state === 'suspended') {
-    ctx.resume().catch(() => {});
+  if (ctx.state === 'suspended' && foreground) {
+    ctx.resume().then(startBgm).catch(() => {});
   }
 
   // 用户第一次手势后开始放 BGM（暂停或静音时都不放）
@@ -239,21 +233,22 @@ export function initAudio() {
   if (!windowHooksBound) {
     windowHooksBound = true;
 
-    window.addEventListener('blur', () => {
+    function loseFocus() {
+      foreground = false;
       stopAllVoices();
       stopBgm();
       if (ctx) ctx.suspend().catch(() => {});
-    });
-
-    window.addEventListener('focus', () => {
-      if (!ctx) return;
-      // resume 是异步的；恢复成功后按当前暂停 / 静音状态决定要不要重开 BGM
-      ctx
-        .resume()
-        .then(() => {
-          if (!musicPaused && !muted) startBgm();
-        })
-        .catch(() => {});
+    }
+    function gainFocus() {
+      if (document.hidden) return;
+      foreground = true;
+      if (ctx) ctx.resume().then(startBgm).catch(() => {});
+    }
+    window.addEventListener('blur', loseFocus);
+    window.addEventListener('focus', gainFocus);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) loseFocus();
+      else if (document.hasFocus()) gainFocus();
     });
   }
 }
@@ -287,7 +282,7 @@ function getShaperCurve() {
 /**
  * 放一段经过滤波的白噪声，用来做爆炸、踩镲、激光空气感。
  * 音量从 gain 指数衰减到 0.0001（指数曲线不允许到 0）。
- * dest 默认是总音量；BGM 的踩镲会传 musicGain，走独立音量。
+ * dest 默认是总音量。
  * 噪声源同样登记进 activeVoices，受 24 上限约束。
  * @param {{duration:number, filterType?:BiquadFilterType, filterFrom:number,
  *          filterTo:number, gain:number, when?:number, dest?:AudioNode}} opts
@@ -546,6 +541,9 @@ export function playSfx(name) {
   if (!canPlaySfx(name, t, lastPlayed)) return;
   lastPlayed[name] = t;
 
+  // 只改变音乐总线；音效配方和音量保持原样。空配方不压低音乐。
+  if (recipe.length) music?.duck();
+
   for (const layer of recipe) {
     // LFO 也是振荡器，要占 2 个名额；普通层占 1 个
     const needed = layer.lfo ? 2 : 1;
@@ -603,6 +601,7 @@ export function toggleMute() {
     );
   }
 
+  music?.setMuted(muted);
   if (muted) {
     stopAllVoices();
     stopBgm();
@@ -614,95 +613,15 @@ export function toggleMute() {
 }
 
 // ------------------------------------------------------------
-// BGM：110 BPM 程序化 4/4 鼓点
+// 战斗音乐状态：暂停续播，重新开局才复位；不修改音效和游戏状态。
 // ------------------------------------------------------------
-
-/** 底鼓：正弦 150→48Hz 快速下滑，0.14 秒。 */
-function playKick(when) {
-  if (!ctx || !musicGain) return;
-  // BGM 也吃 24 上限：满了就少这一记，不排队
-  if (!hasVoiceRoom(activeVoices.size + 1)) return;
-
-  const osc = ctx.createOscillator();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(150, when);
-  osc.frequency.exponentialRampToValueAtTime(48, when + 0.14);
-
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.28, when);
-  g.gain.exponentialRampToValueAtTime(0.0001, when + 0.14);
-
-  osc.connect(g);
-  g.connect(musicGain);
-  registerVoice(osc, [g]);
-  osc.start(when);
-  osc.stop(when + 0.14);
-}
-
-/** 踩镲：0.03 秒白噪声过 7000Hz 高通，走 BGM 独立音量。 */
-function playHat(when) {
-  if (!musicGain) return;
-  if (!hasVoiceRoom(activeVoices.size + 1)) return;
-
-  playNoise({
-    duration: 0.03,
-    filterType: 'highpass',
-    filterFrom: 7000,
-    filterTo: 7000,
-    gain: 0.08,
-    when,
-    dest: musicGain,
-  });
-}
-
-/** 按 16 分步号排这一拍的鼓：每 4 步（每拍）底鼓，每 2 步（八分）踩镲。 */
-function scheduleBgmStep(step, when) {
-  if (step % 4 === 0) playKick(when);
-  if (step % 2 === 0) playHat(when);
-}
-
-/** 前瞻调度：把未来 0.1 秒内该响的鼓点排进 AudioContext。 */
-function bgmTick() {
-  if (!ctx) return;
-
-  // 切到后台时浏览器会把 setInterval 限流，回来时 nextNoteTime 可能已经落后很多。
-  // 直接把它拉回"现在"，否则会把积压的拍子一次性全部排上、听起来像爆音。
-  if (nextNoteTime < ctx.currentTime) nextNoteTime = ctx.currentTime;
-
-  const horizon = ctx.currentTime + LOOKAHEAD_SEC;
-  while (nextNoteTime < horizon) {
-    scheduleBgmStep(stepIndex, nextNoteTime);
-    stepIndex = (stepIndex + 1) % 16; // 16 步一小节循环
-    nextNoteTime += STEP_SEC;
-  }
-}
-
-/** 启动 BGM 调度器（幂等）：从当前时刻对齐，从第 1 拍重新开始。 */
-function startBgm() {
-  // 静音 / 暂停 / 已经有调度器时都不重复启动
-  if (!ctx || muted || bgmTimer !== null) return;
-
-  nextNoteTime = ctx.currentTime;
-  stepIndex = 0;
-  bgmTimer = setInterval(bgmTick, SCHEDULE_MS);
-}
-
-/**
- * 暂停 / 恢复 BGM。
- * 暂停：停掉调度器并把 BGM 音量迅速拉到 0，已经排进时间轴的音也不会再响。
- * 恢复：音量回到 0.5，把 nextNoteTime 对齐到"现在"并从第 1 拍继续（不记暂停瞬间的相位）。
- */
 export function setMusicPaused(paused) {
-  musicPaused = paused;
-  if (!ctx) return; // 还没初始化：只用记下状态，等 initAudio 时再决定放不放
+  musicPaused = Boolean(paused);
+  if (musicPaused) stopBgm();
+  else startBgm();
+}
 
-  if (paused) {
-    stopBgm();
-    if (musicGain) musicGain.gain.setTargetAtTime(0, ctx.currentTime, 0.01);
-    return;
-  }
-
-  if (musicGain) musicGain.gain.setTargetAtTime(MUSIC_VOLUME, ctx.currentTime, 0.01);
-  // 静音时恢复“未暂停”状态，但不能真的开始放 BGM；等取消静音再启动
-  if (!muted) startBgm();
+export function resetMusic() {
+  music?.stop();
+  startBgm();
 }

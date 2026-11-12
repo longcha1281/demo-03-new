@@ -951,6 +951,10 @@
     background: rgba(255, 255, 255, 0.03);
     border: 1px dashed rgba(127, 216, 255, 0.25);
   }
+  #route-backup.over {
+    border-color: #39f6ff;
+    background: rgba(57, 246, 255, 0.08);
+  }
   .route-empty {
     width: 100%;
     padding: 10px;

@@ -9,7 +9,6 @@ import {
   SPAWN,
   SHOT,
   ROOM,
-  BOSS,
   UPGRADE,
   WEAPON,
   HOSTILE,
@@ -24,6 +23,7 @@ import {
   FISSION_FX,
   PICKUP,
   SPELL,
+  BOSS,
 } from '../config.js';
 import { G } from './state.js';
 import { sfxShoot, sfxHit, sfxKill } from './audio.js';
@@ -31,11 +31,6 @@ import { applyBulletEnchant } from './enchant.js';
 import { relicLevel, spawnPickup, applyLifesteal, hurtPlayer } from './player.js';
 import { compileCastData } from './spell.js';
 import { onEnemyDeath } from './enemy.js';
-import {
-  spawnSiegeBreakVolley,
-  bossArchetypeIndex,
-  spawnVoidSplitChildren,
-} from './boss.js';
 
 /**
  * 生成一条伤害飘字；超过硬上限就删最旧的一条。
@@ -141,13 +136,57 @@ export function updateHostile(dt) {
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
 
-      const maxTurn = (h.turnRate || 0) * dt;
+      // 只有带时限的新虚空弹耗尽追踪；旧追踪弹保持原行为。
+      const flightDt = h.voidOrb ? Math.min(dt, Math.max(0, h.life)) : dt;
+      const homingDt = h.homingTime === undefined ? flightDt : Math.min(flightDt, Math.max(0, h.homingTime));
+      const maxTurn = (h.turnRate || 0) * homingDt;
       if (diff > maxTurn) diff = maxTurn;
       else if (diff < -maxTurn) diff = -maxTurn;
 
       const angle = now + diff;
       h.vx = Math.cos(angle) * (h.speed || 0);
       h.vy = Math.sin(angle) * (h.speed || 0);
+      if (h.homingTime !== undefined) {
+        h.homingTime = Math.max(0, h.homingTime - dt);
+        if (h.homingTime === 0) h.homing = false;
+      }
+    }
+
+    if (h.voidOrb) {
+      // 高速虚空弹仅扫掠存活且在屏幕内的实际路径，过期后不再命中。
+      if (h.life <= 0 || h.x < 0 || h.x > CANVAS.WIDTH || h.y < 0 || h.y > CANVAS.HEIGHT) {
+        G.hostile.splice(i, 1);
+        continue;
+      }
+      const fromX = h.x;
+      const fromY = h.y;
+      let flightDt = Math.min(dt, h.life);
+      if (h.vx > 0) flightDt = Math.min(flightDt, (CANVAS.WIDTH - fromX) / h.vx);
+      else if (h.vx < 0) flightDt = Math.min(flightDt, -fromX / h.vx);
+      if (h.vy > 0) flightDt = Math.min(flightDt, (CANVAS.HEIGHT - fromY) / h.vy);
+      else if (h.vy < 0) flightDt = Math.min(flightDt, -fromY / h.vy);
+      h.x += h.vx * flightDt;
+      h.y += h.vy * flightDt;
+      h.life -= dt;
+      if (flightDt > 0) {
+        if (!h.trail) h.trail = [];
+        h.trail.unshift({ x: fromX, y: fromY });
+        if (h.trail.length > 4) h.trail.pop();
+      }
+      const dx = h.x - fromX;
+      const dy = h.y - fromY;
+      const lengthSq = dx * dx + dy * dy;
+      const along = lengthSq > 0
+        ? Math.max(0, Math.min(1, ((p.x - fromX) * dx + (p.y - fromY) * dy) / lengthSq)) : 0;
+      const distance = Math.hypot(p.x - (fromX + dx * along), p.y - (fromY + dy * along));
+      if (p.inv <= 0 && distance < p.r + (h.r || HOSTILE.RADIUS)) {
+        hurtPlayer();
+        if (h.voidSplit) splitVoidOrb(h);
+        G.hostile.splice(i, 1);
+      } else if (h.life <= 0 || flightDt < dt || h.x <= 0 || h.x >= CANVAS.WIDTH || h.y <= 0 || h.y >= CANVAS.HEIGHT) {
+        G.hostile.splice(i, 1);
+      }
+      continue;
     }
 
     h.x += h.vx * dt;
@@ -171,15 +210,13 @@ export function updateHostile(dt) {
       p.inv <= 0 &&
       Math.hypot(p.x - h.x, p.y - h.y) < p.r + (h.r || HOSTILE.RADIUS)
     ) {
-      // 只有虚空大球会分裂；小球只带 voidChild，不会继续分裂
-      const splitsIntoChildren = h.voidOrb && !h.voidChild;
-
       // 统一受伤入口：沙盒模式在这里被拦截，子弹仍然正常消失
-      hurtPlayer();
+      const damaged = hurtPlayer();
+      if (damaged && h.frostSlow) {
+        p.frostSlowTime = Math.max(p.frostSlowTime || 0, BOSS.FROST.iceShotSlowTime);
+      }
+      if (damaged && h.voidSplit) splitVoidOrb(h);
       G.hostile.splice(i, 1);
-
-      // 在命中点分裂成 2 发小球
-      if (splitsIntoChildren) spawnVoidSplitChildren(h);
     }
   }
 }
@@ -313,7 +350,13 @@ export function buildFissionBullets(shot, hitEnemy) {
     parentSpeed > 0
       ? Math.atan2(shot.vy, shot.vx)
       : Math.atan2(hitEnemy.y - shot.y, hitEnemy.x - shot.x);
-  const childSpeed = parentSpeed > 0 ? parentSpeed : SHOT.SPEED;
+
+  // 母弹是闪电就直接继承它的高速；母弹普通但闪电排在裂变后，子代才第一次变闪电。
+  const childLightning = !!shot.isLightning || !!shot.childLightning;
+  let childSpeed = parentSpeed > 0 ? parentSpeed : SHOT.SPEED;
+  if (childLightning && !shot.isLightning) {
+    childSpeed *= SPELL.LIGHTNING_SPEED_MUL;
+  }
 
   // 裂变基础发数：由裂变遗物等级决定（Lv1=2、Lv2=3、Lv3=4）
   const fissionBaseCount = cfg.count;
@@ -346,7 +389,7 @@ export function buildFissionBullets(shot, hitEnemy) {
   const childHitsLeft = inheritedTags.includes('pierce')
     ? 1 + SPELL.PIERCE_BONUS
     : 1;
-  const childLife = shot.isLightning
+  const childLife = childLightning
     ? SHOT.LIFE * SPELL.LIGHTNING_LIFE_MUL
     : cfg.life;
 
@@ -388,8 +431,9 @@ export function buildFissionBullets(shot, hitEnemy) {
       fissionSpread: shot.fissionSpread || 0,
       castCount: finalCount,
       castSpread: shot.castSpread || 0,
-      // 母弹的闪电形态必须传给子代，子代才是"雷电追踪弹"
-      isLightning: !!shot.isLightning,
+      // 母弹的闪电形态必须传给子代；闪电排在裂变后时，子代才第一次变闪电
+      isLightning: childLightning,
+      childLightning,
       // 追踪参数继承；回旋的整套状态机不继承，子代只保留飞行弹道
       homingRange: shot.homingRange,
       homingTurn: shot.homingTurn,
@@ -524,7 +568,13 @@ export function updateAttack(dt) {
   const spawnCount =
     castData.fissionCount > 0 ? castData.fissionCount : castData.count;
   const count = Math.min(SPELL.CAST_MAX_COUNT, spawnCount);
-  const step = count > 1 ? castData.spread : 0;
+  // 散射 + 裂变/追踪：每多一个标签把扇角放大 1.35 倍（封顶 0.30 弧度）
+  let spread = castData.spread;
+  const wideTags =
+    (castData.tags.includes('fission') ? 1 : 0) +
+    (castData.tags.includes('homing') ? 1 : 0);
+  if (wideTags > 0) spread = Math.min(0.30, spread * Math.pow(1.35, wideTags));
+  const step = count > 1 ? spread : 0;
 
   // 闪电形态：高速、短寿命；子代会继承这个形态。
   const isLightning = castData.form === 'lightning';
@@ -559,6 +609,8 @@ export function updateAttack(dt) {
       tags: castData.tags,       // 效果标签，命中结算按它判断
       depth: 0,                  // 裂变代数：母弹 0
       isLightning,               // 闪电形态，命中后传给子代
+      // 闪电排在裂变后：母弹仍是普通弹，只有命中炸出的子代变闪电
+      childLightning: !!castData.childLightning,
       fissionLevel: castData.levels.hitFission || 0,
       // 裂变快照 + 最终数量/张角：命中时用它们判断“散射到底在裂变前还是后”
       fissionCount: castData.fissionCount,
@@ -693,13 +745,13 @@ export function nearestUnhitEnemy(x, y, exclude, range) {
   return nearest;
 }
 
-/** 返程到家：进入缓冲直飞；缓冲结束后有追踪才继续索敌，没有追踪就销毁。 */
+/** 返程到家：进入缓冲直飞，缓冲结束后统一进入游离段。 */
 export function finishBoomerangReturn(s) {
   s.phase = 'BUFFER';
   s.bufferTraveled = 0;
 }
 
-/** 缓冲飞满且带追踪：进入游离段，重新索敌。 */
+/** 缓冲飞满：进入游离段；有追踪就索敌，纯回旋保持直线飞行。 */
 export function enterHomingFree(s) {
   s.phase = 'HOMING_FREE';
   s.freeTraveled = 0;
@@ -767,12 +819,9 @@ export function moveBoomerang(s, dt) {
     s.bufferTraveled += speed * dt;
 
     if (s.bufferTraveled >= cfg.BUFFER_DIST) {
-      // 缓冲结束：带追踪才进入游离索敌；纯回旋直接销毁，不再直线乱飞
-      if (s.hasHoming) {
-        enterHomingFree(s);
-      } else {
-        s.done = true;
-      }
+      // 缓冲结束一律进入游离段：纯回旋也继续直线飞，
+      // 直到游离射程耗尽；不再在这里提前销毁
+      enterHomingFree(s);
     }
     return;
   }
@@ -798,6 +847,56 @@ export function moveBoomerang(s, dt) {
 }
 
 /**
+ * 首领对玩家子弹的被动影响（只改位置，不改 vx/vy）：
+ * - 极寒霜卫：100px 内子弹这一帧的路程减半；
+ * - 虚空母巢：150px 内子弹被轻轻拉向 Boss，轨迹微微弯过去。
+ * @param {object} s 玩家子弹
+ * @param {number} prevX 移动前 x
+ * @param {number} prevY 移动前 y
+ * @param {number} dt 秒
+ */
+function applyBossBulletFields(s, prevX, prevY, dt) {
+  for (const e of G.enemies) {
+    if (e.type !== 'boss') continue;
+
+    if (e.bossIndex === 1) {
+      const cfg = BOSS.FROST;
+      const dist = Math.hypot(s.x - e.x, s.y - e.y);
+      if (dist < cfg.bulletAura) {
+        // 把这一帧已经走完的距离按比例缩回去，相当于速度 ×0.5
+        s.x = prevX + (s.x - prevX) * cfg.bulletSlow;
+        s.y = prevY + (s.y - prevY) * cfg.bulletSlow;
+      }
+    } else if (e.bossIndex === 3) {
+      // 回旋与两种追踪标记都沿用自身弹道，不叠加引力转向。
+      if (s.phase || s.hasHoming || s.homingRange) continue;
+      const cfg = BOSS.VOID;
+      const dx = e.x - s.x;
+      const dy = e.y - s.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist >= cfg.attractRadius) {
+        s.gravityTime = 0;
+        continue;
+      }
+
+      s.gravityTime = (s.gravityTime || 0) + dt;
+      // 超时或贴脸后直飞，给子弹离开场的机会。
+      if (s.gravityTime > cfg.fieldMaxTime || dist < 24) continue;
+      const speed = Math.hypot(s.vx, s.vy);
+      if (speed < 1) continue;
+      const current = Math.atan2(s.vy, s.vx);
+      const target = Math.atan2(dy, dx);
+      const delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
+      const maxTurn = cfg.maxTurnRate * dt;
+      const turn = Math.max(-maxTurn, Math.min(maxTurn, delta));
+      s.vx = Math.cos(current + turn) * speed;
+      s.vy = Math.sin(current + turn) * speed;
+
+    }
+  }
+}
+
+/**
  * g. 玩家子弹：飞行、追踪 / 回旋、命中结算、穿透 / 裂变 / 闪电 / 汲取。
  * 回旋镖按阶段决定去重集合与伤害；出屏立刻删除（含返程）。
  * 裂变子弹在命中这一帧就推进 G.shots，观感没有延迟。
@@ -811,6 +910,10 @@ export function updateShots(dt) {
   for (let i = G.shots.length - 1; i >= 0; i--) {
     const s = G.shots[i];
 
+    // 记住这一帧移动前的位置，用于冰霜光环“只走一半”的修正
+    const prevX = s.x;
+    const prevY = s.y;
+
     // 裂变子弹出生保护：先递减，再在碰撞前判断
     if (s.spawnInvulnerability > 0) {
       s.spawnInvulnerability = Math.max(0, s.spawnInvulnerability - dt);
@@ -821,7 +924,7 @@ export function updateShots(dt) {
     if (s.phase) {
       moveBoomerang(s, dt);
 
-      // 没有追踪的回旋镖到家后标记删除
+      // 游离射程耗尽后标记删除（纯回旋/追踪都走这里）
       if (s.done) {
         G.shots.splice(i, 1);
         continue;
@@ -831,6 +934,9 @@ export function updateShots(dt) {
       s.x += s.vx * dt;
       s.y += s.vy * dt;
     }
+
+    // 首领对玩家子弹的影响：极寒减速 / 虚空轻吸
+    applyBossBulletFields(s, prevX, prevY, dt);
 
     s.life -= dt;
 
@@ -941,30 +1047,24 @@ export function updateShots(dt) {
           s.hitsLeft--;
           if (s.hitsLeft <= 0) beginBoomerangReturn(s);
         } else if (isHomingFree) {
-          // 游离阶段不消耗 hitsLeft
-          if (s.hasHoming) {
-            // 有追踪：无穿透就找下一个弹射，没有就返程
-            if (!s.hasPierce) {
-              const next = nearestUnhitEnemy(
-                e.x,
-                e.y,
-                s.hitIds,
-                s.homingRange
-              );
-              if (next) {
-                // 0.12 秒短暂直飞过去，计时结束再恢复追踪
-                const angle = Math.atan2(next.y - e.y, next.x - e.x);
-                const speed = Math.hypot(s.vx, s.vy);
-                s.vx = Math.cos(angle) * speed;
-                s.vy = Math.sin(angle) * speed;
-                s.ricochetTimer = 0.12;
-              } else {
-                s.done = true; // 没有目标了，直接销毁，不再回旋
-              }
+          // 游离阶段不消耗 hitsLeft；没有新目标也继续飞，
+          // 交给射程或出屏回收，等新目标出现后还能再追踪
+          if (s.hasHoming && !s.hasPierce) {
+            const next = nearestUnhitEnemy(
+              e.x,
+              e.y,
+              s.hitIds,
+              s.homingRange
+            );
+            if (next) {
+              // 0.12 秒短暂直飞过去，计时结束再恢复追踪
+              const angle = Math.atan2(next.y - e.y, next.x - e.x);
+              const speed = Math.hypot(s.vx, s.vy);
+              s.vx = Math.cos(angle) * speed;
+              s.vy = Math.sin(angle) * speed;
+              s.ricochetTimer = 0.12;
             }
-          } else if (!s.hasPierce) {
-            // 纯回旋无穿透：打中一次就回收，避免一颗弹无限串糖葫芦
-            s.done = true;
+            // 没有下一个目标时不销毁：下一帧 steerHomingShot 继续找
           }
           // 纯回旋 + 穿透：不转向、不删除，继续直线飞，靠 hitIds 去重
         } else if (!s.phase) {
@@ -983,6 +1083,57 @@ export function updateShots(dt) {
   }
 }
 
+/** 首领护盾破碎：词缀护盾开始冷却；熔核终极放一圈环形弹。 */
+function breakBossShield(e) {
+  addShake(3);
+  sfxHit();
+
+  if (e.affix === 'shield') {
+    e.bossShieldCd = BOSS.AFFIX.SHIELD_CD;
+    return;
+  }
+  if (e.ultimate !== 2) return;
+
+  const m = BOSS.MUTATION;
+  for (let i = 0; i < m.SIEGE_BREAK_COUNT; i++) {
+    if (G.hostile.length >= LIMITS.hostileShots) break;
+    const angle = (Math.PI * 2 * i) / m.SIEGE_BREAK_COUNT;
+    G.hostile.push({
+      x: e.x,
+      y: e.y,
+      vx: Math.cos(angle) * m.SIEGE_BREAK_SPEED,
+      vy: Math.sin(angle) * m.SIEGE_BREAK_SPEED,
+      life: m.SIEGE_BREAK_LIFE,
+      color: BOSS.MOLTEN.color,
+      r: HOSTILE.RADIUS,
+    });
+  }
+}
+
+/** 终极·虚空：大球命中玩家后分裂成几颗有寿命的小球。 */
+function splitVoidOrb(h) {
+  const m = BOSS.MUTATION;
+  for (let i = 0; i < m.VOID_SPLIT_COUNT; i++) {
+    if (G.hostile.length >= LIMITS.hostileShots) break;
+    const angle = Math.random() * Math.PI * 2;
+    G.hostile.push({
+      x: h.x,
+      y: h.y,
+      vx: Math.cos(angle) * m.VOID_CHILD_SPEED,
+      vy: Math.sin(angle) * m.VOID_CHILD_SPEED,
+      speed: m.VOID_CHILD_SPEED,
+      life: m.VOID_CHILD_LIFE,
+      r: m.VOID_CHILD_RADIUS,
+      color: h.color,
+      element: 'void',
+      voidOrb: true,
+      homing: true,
+      homingTime: m.VOID_CHILD_LIFE,
+      turnRate: m.VOID_CHILD_TURN,
+    });
+  }
+}
+
 /**
  * 所有伤害都从这里进：子弹直伤、灼烧、侵蚀、元素爆发、黑洞。
  * 负责扣血、生成飘字，并在"这一下把敌人打死"时结算击杀 / 得分 / 音效 / 首领标记。
@@ -995,27 +1146,7 @@ export function damageEnemy(e, amount, color) {
   // e.dead 是“死亡效果已经结算过”的锁；hp<=0 的尸体也不再吃任何伤害
   if (!e || e.hp <= 0 || e.dead) return;
 
-  // 攻城兽的力场护盾：只要还有盾，本体一点血都不掉。
-  // 伤害先扣盾，盾破的那一下开始计时 4 秒，之后才能重新套盾。
-  if (e.type === 'boss' && e.shield > 0) {
-    const absorbed = Math.min(e.shield, amount);
-    e.shield -= absorbed;
-    spawnCombatText(e.x, e.y - e.r - 12, absorbed, COLORS.boss);
-    if (e.shield <= 0) {
-      e.shield = 0;
-      e.shieldCd = BOSS.SKILL.SHIELD_CD;
-
-      // 第 3 轮攻城兽质变：破盾瞬间向四周打 20 发环形弹
-      if (e.bossRound >= 3 && bossArchetypeIndex(e) === 2) {
-        spawnSiegeBreakVolley(e);
-      }
-
-      addShake(4);
-    }
-    return;
-  }
-
-  // 精英的词缀护盾：和 Boss 一样先扣盾，盾破那一下开始 4 秒冷却
+  // 精英的词缀护盾：先扣盾，盾破那一下开始 4 秒冷却
   if (e.type === 'elite' && e.eliteShield > 0) {
     const absorbed = Math.min(e.eliteShield, amount);
     e.eliteShield -= absorbed;
@@ -1026,6 +1157,24 @@ export function damageEnemy(e, amount, color) {
       addShake(3);
     }
     return;
+  }
+
+  // 首领护盾：伤害先扣盾，盾破那一下不溢出到血条。
+  if (e.type === 'boss' && e.bossShield > 0) {
+    const absorbed = Math.min(e.bossShield, amount);
+    e.bossShield -= absorbed;
+    spawnCombatText(e.x, e.y - e.r - 12, absorbed, COLORS.ice);
+    if (e.bossShield <= 0) {
+      e.bossShield = 0;
+      breakBossShield(e);
+    }
+    return;
+  }
+
+  // 仅熔核使用装甲倍率；暴露期间取消常态减伤。
+  if (e.type === 'boss' && e.bossIndex === 2) {
+    const cfg = BOSS.MOLTEN;
+    amount *= e.armorExposed > 0 ? cfg.exposeDamageMul : (1 - cfg.armorReduction);
   }
 
   e.hp -= amount;
@@ -1048,10 +1197,13 @@ export function damageEnemy(e, amount, color) {
     spawnPickup(e.x, e.y);
   }
 
-  // 首领死亡：标记本房已击败，update 里会立刻打开遗物面板
+  // 首领死亡：双 Boss 要两只都死（且第二只已入场）才算本房击败
   if (e.type === 'boss') {
-    G.bossDefeatedThisRoom = true;
     G.bossesCleared++;
+    const anotherAlive = G.enemies.some(
+      (o) => o !== e && o.type === 'boss' && o.hp > 0 && !o.dead
+    );
+    if (!anotherAlive && !G.pendingBossSpawn) G.bossDefeatedThisRoom = true;
 
     // 主人死了，召唤物一起退场（下一帧 updateEnemies 会把它们标成 0 血）
     for (const m of G.enemies) {

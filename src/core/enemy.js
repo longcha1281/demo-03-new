@@ -30,12 +30,7 @@ import {
   spawnHostileShot,
   addShake,
 } from './combat.js';
-import {
-  updateBossSkills,
-  updateBossAttack,
-  spawnFlameHazard,
-  bossArchetypeIndex,
-} from './boss.js';
+import { updateBossSkills } from './boss.js';
 import { spawnPickup, hurtPlayer } from './player.js';
 
 // 敌人 id 自增器：每生成一只就 +1，方便以后做"同一目标只算一次"之类的去重
@@ -65,26 +60,34 @@ export function growth(wave) {
 export function enemyStats(type, wave) {
   const base = ENEMY.TYPES[type];
   const g = growth(wave);
+  // 第 25 房后仍缓慢成长：普通/重甲每房 +4 血 +0.4 速，精英每房 +8 血
+  const late = Math.max(0, wave - ENEMY.HP_GROWTH_CAP_WAVE);
 
-  // 移速：基础值 + 每房成长，封顶 SPEED_CAP
+  // 移速：基础值 + 每房成长，普通/重甲第 25 房后再加后期成长，封顶 SPEED_CAP
   const speed = Math.min(
     ENEMY.SPEED_CAP,
-    base.speed + ENEMY.SPEED_GROWTH_PER_WAVE * g
+    base.speed +
+      ENEMY.SPEED_GROWTH_PER_WAVE * g +
+      (type === 'elite' ? 0 : ENEMY.SPEED_GROWTH_LATE_PER_WAVE * late)
   );
 
   if (type === 'elite') {
+    const eliteHp = Math.min(
+      ENEMY.ELITE_HP_CAP,
+      ENEMY.ELITE_HP_BASE + ENEMY.ELITE_HP_PER_GROWTH * g
+    );
     return {
-      hp: Math.min(
-        ENEMY.ELITE_HP_CAP,
-        ENEMY.ELITE_HP_BASE + ENEMY.ELITE_HP_PER_GROWTH * g
-      ),
+      hp: Math.min(ENEMY.ELITE_HP_LATE_CAP, eliteHp + ENEMY.ELITE_HP_GROWTH_LATE * late),
       speed,
       r: ENEMY.RADIUS.elite,
     };
   }
 
   return {
-    hp: base.hp + ENEMY.HP_GROWTH_PER_WAVE * g,
+    hp: Math.min(
+      ENEMY.HP_LATE_CAP,
+      base.hp + ENEMY.HP_GROWTH_PER_WAVE * g + ENEMY.HP_GROWTH_LATE_PER_WAVE * late
+    ),
     speed,
     r: ENEMY.RADIUS.normal,
   };
@@ -296,18 +299,13 @@ export function updateEnemies(dt) {
     // 精英词缀：护盾刷新 / 定时瞬移
     if (e.type === 'elite') updateEliteAffix(e, dt);
 
-    // 先处理"开火"：射手/精英各自有冷却；首领按词缀·暴怒加速冷却推进
-    const bossTick =
-      e.type === 'boss' && e.affix === 'rage'
-        ? dt * BOSS.AFFIX.RAGE_RATE_MUL
-        : dt;
-
+    // 先处理"开火"：射手/精英各自有冷却；首领推进裂隙切割冷却
     if (e.type === 'shooter') {
       updateShooterAttack(e, len, dt * auraRate);
     } else if (e.type === 'elite') {
       updateEliteAttack(e, len, dt * auraRate);
     } else if (e.type === 'boss') {
-      updateBossSkills(e, bossTick);
+      updateBossSkills(e, dt);
     }
 
     // 基础速度；小怪在首领光环范围内要加速
@@ -344,33 +342,8 @@ export function updateEnemies(dt) {
     // 自爆蛛的引信一旦点燃，就钉在原地等爆炸，不再追玩家
     if (fuseStopped) speed = 0;
 
-    let charged = false;
-
-    // 首领冲锋：预警结束后的 0.35s 沿锁定方向直线冲
-    if (e.type === 'boss' && e.chargeTime > 0) {
-      e.x += e.chargeDX * BOSS.SKILL.CHARGE_SPEED * dt;
-      e.y += e.chargeDY * BOSS.SKILL.CHARGE_SPEED * dt;
-      charged = true;
-
-      // 第 3 轮的裂隙质变：冲锋路径每 0.06s 留下一个火焰节点
-      if (e.bossRound >= 3 && bossArchetypeIndex(e) === 0) {
-        e.flameTick -= dt;
-        // 最多补 4 个节点，且间隔至少 0.016 秒；即使配置被改成 0 也不会卡死
-        const flameGap = Math.max(0.016, BOSS.MUTATION.RIFT_FLAME_INTERVAL);
-        for (let n = 0; n < 4 && e.flameTick <= 0; n++) {
-          spawnFlameHazard(e.x, e.y);
-          e.flameTick += flameGap;
-        }
-      }
-    }
-
-    // 预警期间站住不动，给玩家看红线
-    if (e.type === 'boss' && e.chargeWarn > 0) {
-      speed = 0;
-    }
-
-    // 普通移动（冲锋已经单独位移过，就不再叠加）
-    if (!charged && len !== 0 && speed !== 0) {
+    // 普通移动：所有敌人（包括裂隙刺客）都直接朝玩家追
+    if (len !== 0 && speed !== 0) {
       e.x += (dx / len) * speed * dt;
       e.y += (dy / len) * speed * dt;
     }
@@ -379,16 +352,23 @@ export function updateEnemies(dt) {
     e.x = Math.max(ARENA.MARGIN_X, Math.min(CANVAS.WIDTH - ARENA.MARGIN_X, e.x));
     e.y = Math.max(ARENA.MARGIN_TOP, Math.min(CANVAS.HEIGHT - ARENA.MARGIN_BOTTOM, e.y));
 
-    // 首领每帧检查普通出招冷却（第 3 轮由质变接管）
-    if (e.type === 'boss') {
-      updateBossAttack(e, bossTick);
-    }
-
     // 用移动后的位置算接触：两圆半径相加以内就算贴上
     const hitDx = p.x - e.x;
     const hitDy = p.y - e.y;
     if (Math.hypot(hitDx, hitDy) < e.r + PLAYER.radius && p.inv <= 0) {
-      hurtPlayer(); // 统一受伤入口：沙盒模式不掉血
+      const damaged = hurtPlayer(); // 统一受伤入口：沙盒模式不掉血
+
+      // 只有真的扣了血才弹开：沙盒/无敌帧里不会一直弹
+      if (damaged && e.type === 'boss') {
+        const away = Math.hypot(hitDx, hitDy);
+        // 极端情况下两个圆心重合，方向会变成 0；默认往下弹，避免原地卡住
+        const nx = away > 0.001 ? hitDx / away : 0;
+        const ny = away > 0.001 ? hitDy / away : 1;
+        e.x -= nx * BOSS.RIFT.contactRecoil;
+        e.y -= ny * BOSS.RIFT.contactRecoil;
+        e.x = Math.max(ARENA.MARGIN_X, Math.min(CANVAS.WIDTH - ARENA.MARGIN_X, e.x));
+        e.y = Math.max(ARENA.MARGIN_TOP, Math.min(CANVAS.HEIGHT - ARENA.MARGIN_BOTTOM, e.y));
+      }
     }
   }
 }
